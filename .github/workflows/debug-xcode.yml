@@ -5,13 +5,15 @@ jobs:
   debug:
     runs-on: xcode-27
     steps:
-      - name: Inspect Xcode and SDK
+      - name: Which Xcode has NSURLHandle.h
         run: |
-          set -x
-          ls /Applications | grep -i xcode || true
-          xcode-select -p
-          SDK=$(xcrun --sdk iphoneos --show-sdk-path); echo "SDK=$SDK"
-          ls "$SDK/System/Library/Frameworks/Foundation.framework/Headers" | grep -i url || true
-          sed -n '1,30p' "$SDK/System/Library/Frameworks/Foundation.framework/Headers/NSURL.h"
-          grep -rn "NSURLHandle" "$SDK/System/Library/Frameworks/Foundation.framework/Headers" | head -20 || true
-          grep -rn "NSURLHandle" "$SDK/System/Library/Frameworks" --include=*.h -l 2>/dev/null | head || true
+          for x in /Applications/Xcode*.app; do
+            dev="$x/Contents/Developer"
+            sdk=$(DEVELOPER_DIR="$dev" xcrun --sdk iphoneos --show-sdk-path 2>/dev/null) || continue
+            ver=$(DEVELOPER_DIR="$dev" xcodebuild -version 2>/dev/null | head -1)
+            if [ -f "$sdk/System/Library/Frameworks/Foundation.framework/Headers/NSURLHandle.h" ]; then
+              echo "OK   $x | $ver | $sdk"
+            else
+              echo "MISS $x | $ver | $sdk"
+            fi
+          done
