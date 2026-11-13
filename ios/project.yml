@@ -58,6 +58,12 @@ targets:
           - "$(SRCROOT)/../core"
           - "$(SRCROOT)/../host"
           - "$(SRCROOT)/../devices"
+          # Xcode 27.x iPhoneOS SDK lacks Foundation/NSURLHandle.h; see ios/shim.
+          - "$(SRCROOT)/shim"
+        OTHER_SWIFT_FLAGS:
+          - "$(inherited)"
+          - "-Xcc"
+          - "-I$(SRCROOT)/shim"
         LIBRARY_SEARCH_PATHS:
           - "$(inherited)"
           - "$(SRCROOT)/../build/ios"
@@ -170,6 +176,14 @@ targets:
         APPLICATION_EXTENSION_API_ONLY: YES
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1,2"
+        # Same iOS 27 SDK NSURLHandle.h gap; see ios/shim.
+        HEADER_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(SRCROOT)/shim"
+        OTHER_SWIFT_FLAGS:
+          - "$(inherited)"
+          - "-Xcc"
+          - "-I$(SRCROOT)/shim"
         LD_RUNPATH_SEARCH_PATHS:
           - "$(inherited)"
           - "@executable_path/../../Frameworks"
