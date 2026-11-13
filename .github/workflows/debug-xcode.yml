@@ -1,0 +1,17 @@
+name: Debug Xcode SDK
+on:
+  workflow_dispatch: {}
+jobs:
+  debug:
+    runs-on: xcode-27
+    steps:
+      - name: Inspect Xcode and SDK
+        run: |
+          set -x
+          ls /Applications | grep -i xcode || true
+          xcode-select -p
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path); echo "SDK=$SDK"
+          ls "$SDK/System/Library/Frameworks/Foundation.framework/Headers" | grep -i url || true
+          sed -n '1,30p' "$SDK/System/Library/Frameworks/Foundation.framework/Headers/NSURL.h"
+          grep -rn "NSURLHandle" "$SDK/System/Library/Frameworks/Foundation.framework/Headers" | head -20 || true
+          grep -rn "NSURLHandle" "$SDK/System/Library/Frameworks" --include=*.h -l 2>/dev/null | head || true
