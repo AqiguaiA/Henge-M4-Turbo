@@ -70,6 +70,13 @@ jobs:
         working-directory: Henge
         run: make ios-lib IOS_CFLAGS="-std=c11 -Wall -Wextra -O3 -mcpu=apple-m4 -g -Icore -Ihost -Idevices -I${IOS_DEPS}/include/slirp"
 
+      - name: Patch iPhoneOS SDK NSURLHandle.h (Xcode 27 SDK bug)
+        working-directory: Henge
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          sudo cp ios/shim/Foundation/NSURLHandle.h "$SDK/System/Library/Frameworks/Foundation.framework/Headers/NSURLHandle.h"
+          ls -l "$SDK/System/Library/Frameworks/Foundation.framework/Headers/NSURLHandle.h"
+
       - name: Package Henge.ipa
         working-directory: Henge
         run: zsh ios/scripts/package_ipa.sh
