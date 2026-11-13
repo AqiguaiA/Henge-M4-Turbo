@@ -22,6 +22,8 @@ xcodebuild -project Henge.xcodeproj -scheme Henge -configuration Release -sdk ip
     grep -E "error:|BUILD" "$DD.buildlog" | sort -u
     echo "---- error context ----" >&2
     grep -B6 -A2 "error:" "$DD.buildlog" | head -120 >&2 || true
+    echo "---- buildlog tail ----" >&2
+    tail -200 "$DD.buildlog" >&2 || true
     echo "==> the build failed; nothing packaged" >&2
     exit 1
 }
