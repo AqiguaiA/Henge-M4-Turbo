@@ -5,15 +5,23 @@ jobs:
   debug:
     runs-on: xcode-27
     steps:
-      - name: Which Xcode has NSURLHandle.h
+      - name: Test NSURLHandle shim for ObjC and Swift
         run: |
-          for x in /Applications/Xcode*.app; do
-            dev="$x/Contents/Developer"
-            sdk=$(DEVELOPER_DIR="$dev" xcrun --sdk iphoneos --show-sdk-path 2>/dev/null) || continue
-            ver=$(DEVELOPER_DIR="$dev" xcodebuild -version 2>/dev/null | head -1)
-            if [ -f "$sdk/System/Library/Frameworks/Foundation.framework/Headers/NSURLHandle.h" ]; then
-              echo "OK   $x | $ver | $sdk"
-            else
-              echo "MISS $x | $ver | $sdk"
-            fi
-          done
+          set -x
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          MACSDK=$(xcrun --sdk macosx --show-sdk-path)
+          ls "$SDK/System/Library/Frameworks/Foundation.framework/Modules" 2>/dev/null || true
+          head -40 "$SDK/System/Library/Frameworks/Foundation.framework/Modules/module.modulemap" 2>/dev/null || true
+          ls "$MACSDK/System/Library/Frameworks/Foundation.framework/Headers" | grep -i urlhandle || echo "macOS SDK also missing NSURLHandle.h"
+          mkdir -p /tmp/shim/Foundation
+          printf '#import <Foundation/NSObject.h>\n@class NSURLHandle;\n' > /tmp/shim/Foundation/NSURLHandle.h
+          printf '#import <Foundation/Foundation.h>\nint f(void){return 0;}\n' > /tmp/t.m
+          printf 'import Foundation\npublic func g() -> Int { 1 }\n' > /tmp/t.swift
+          echo "== objc without shim =="
+          clang -arch arm64 -miphoneos-version-min=17.0 -isysroot "$SDK" -c /tmp/t.m -o /tmp/t0.o 2>&1 | head -5 || true
+          echo "== objc with CPATH shim =="
+          CPATH=/tmp/shim clang -arch arm64 -miphoneos-version-min=17.0 -isysroot "$SDK" -c /tmp/t.m -o /tmp/t1.o && echo OBJC_SHIM_OK
+          echo "== swift with -Xcc -I shim =="
+          xcrun --sdk iphoneos swiftc -target arm64-apple-ios17.0 -sdk "$SDK" -Xcc -I -Xcc /tmp/shim -c /tmp/t.swift -o /tmp/t2.o && echo SWIFT_XCC_OK
+          echo "== swift without shim =="
+          xcrun --sdk iphoneos swiftc -target arm64-apple-ios17.0 -sdk "$SDK" -c /tmp/t.swift -o /tmp/t3.o 2>&1 | head -10 || true
