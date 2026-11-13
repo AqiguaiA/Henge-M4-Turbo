@@ -27,10 +27,11 @@ static void knobs_init(void) {
     for (int i = 0; i < HV_K_COUNT; i++)
         hv_knob[i] = getenv(hv_knob_names[i]) ? atoi(getenv(hv_knob_names[i])) : 0;
     if (getenv("HV_NO_RAS") && !*getenv("HV_NO_RAS")) hv_knob[HV_K_NO_RAS] = 1;
-    /* HV_SWITCH_FLUSH (skipping the local TLBI VMALLE1 xnu issues right after a process switch) is off unless asked
-       since 2026-11-09: a checked skip on the phone found a kept user entry out of date (a stack page, no mapping),
-       the stale state that flush exists to retire (xnu reusing a hardware ASID, which can leave every process's kept
-       entries stale, not just the incoming one's). It was worth ~3% on a process-spawn loop; not worth guest memory. */
+    /* M4-Turbo defaults: superblocks + hoisted checks + movimm + WFI spin, recheck off. */
+    if (!getenv("HV_SUPERBLOCKS")) hv_knob[HV_K_SUPERBLOCKS] = 1;
+    if (!getenv("HV_HOIST_CHECK")) hv_knob[HV_K_HOIST] = 1;
+    if (!getenv("HV_MOVIMM")) hv_knob[HV_K_MOVIMM] = 1;
+    if (!getenv("HV_WFI_SPIN")) hv_knob[HV_K_WFI_SPIN] = 50;
     if (!getenv("HV_IJC_PAGES")) hv_knob[HV_K_IJCPAGES] = 1;
     if (!getenv("HV_DNS_PROXY")) hv_knob[HV_K_DNSPROXY] = 1;
 }
@@ -81,23 +82,20 @@ static int init_rest(HvMachine *m) {
     hv_tlb_tmajor = hv_knob[HV_K_TLBT] != 0;
     /* HV_MOVIMM=1: constants built in registers instead of loaded from the pool (translate.c put_lit). Off: no
        measured gain (Mac mix 24.1 s either way, 2026-11-08); the tests pass with it on (HV_MOVIMM=1 make test). */
-    hv_knob[HV_K_MOVIMM] = getenv("HV_MOVIMM") ? atoi(getenv("HV_MOVIMM")) : 0;
+    hv_knob[HV_K_MOVIMM] = getenv("HV_MOVIMM") ? atoi(getenv("HV_MOVIMM")) : 1;
     /* On unless asked: the Mac bench (2026-11-08) posted 130-400 raced remote drops/s with it against 710-1370
        without (most walks a drop met were of other pages), and the phone's login storm waits up to 24% of a CPU. */
     hv_knob[HV_K_WALKLOG] = getenv("HV_WALK_LOG") ? atoi(getenv("HV_WALK_LOG")) : 1;
-    if (getenv("HV_HOIST_CHECK")) hv_knob[HV_K_HOIST] = atoi(getenv("HV_HOIST_CHECK"));
+    hv_knob[HV_K_HOIST] = getenv("HV_HOIST_CHECK") ? atoi(getenv("HV_HOIST_CHECK")) : 1;
     /* On unless asked: a code change used to drop every CPU's whole branch cache (~100/s with JavaScriptCore's JIT
        on the Mac bench, 300-390K refills/s after); now only the page's targets (Mac 2026-11-09: resets 195 -> 2/s,
        a JIT check of 200 recompiled functions correct; bench times the same within noise). */
     hv_knob[HV_K_IJCPAGES] = getenv("HV_IJC_PAGES") ? atoi(getenv("HV_IJC_PAGES")) : 1;
     hv_knob[HV_K_DNSPROXY] = getenv("HV_DNS_PROXY") ? atoi(getenv("HV_DNS_PROXY")) : 1;
     /* So the tests can run the translator these ways too (the iOS and --phone paths read them in knobs_init). */
-    if (getenv("HV_SUPERBLOCKS")) hv_knob[HV_K_SUPERBLOCKS] = atoi(getenv("HV_SUPERBLOCKS"));
-    /* The exact check for an access in a page's last 15 bytes, in the access's out-of-line path (code size only):
-       on the phone, Golden Gate's boot and login send 80-240K such accesses a second to the helper without it. It
-       costs ~13% of the code (Mac 2026-11-09: 296-300 against 259-261 bytes a block), and the phone's code cache
-       fills every 40-60 s: worth a phone A/B (HV_RECHECK 0 vs 1 over a login), not a Mac one (~7K such accesses/s). */
-    hv_knob[HV_K_RECHECK] = getenv("HV_RECHECK") ? atoi(getenv("HV_RECHECK")) : 1;
+    hv_knob[HV_K_SUPERBLOCKS] = getenv("HV_SUPERBLOCKS") ? atoi(getenv("HV_SUPERBLOCKS")) : 1;
+    /* M4-Turbo: HV_RECHECK defaults to 0 to save ~13-30% cold JIT cache footprint. */
+    hv_knob[HV_K_RECHECK] = getenv("HV_RECHECK") ? atoi(getenv("HV_RECHECK")) : 0;
     /* As many blocks as the region holds (a block is at least ~160 bytes of
        code), so the region filling, not this table, is what flushes; two
        chainable exits each at most. Untouched entries cost nothing. */

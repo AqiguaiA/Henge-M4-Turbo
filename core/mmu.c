@@ -355,11 +355,24 @@ void hv_tlb_flush_user_range(HvCpu *cpu, uint64_t va, uint64_t len) {
 void hv_tlb_flush_kernel_range(HvCpu *cpu, uint64_t va, uint64_t len) {
     if (cpu->m && cpu->m->stats_interval) cpu->m->stats.kernel_ranges++;
     uint64_t first = va & ~(uint64_t)PAGE_MASK;
-    if (len <= (4096ull << HV_TLB_PAGE_BITS)) {
+    if (len <= (256ull << HV_TLB_PAGE_BITS)) {
         for (uint64_t p = first; p < va + len; p += 1ull << HV_TLB_PAGE_BITS) hv_tlb_flush_va_asid(cpu, p, -1);
         return;
     }
     uint64_t lo = first & 0x00ffffffffffffffull, hi = (va + len) & 0x00ffffffffffffffull; /* tagged addresses: by the low 56 bits */
+    if (cpu->nkernel_fills <= HV_KERNEL_FILLS) {
+        /* kernel_fills[] holds hv_tlb_code() values, i.e. indexes into cpu->tlb (as user_fills[] does). */
+        for (uint32_t k = 0; k < cpu->nkernel_fills; k++) {
+            HvTlbEntry *e = &cpu->tlb[0] + cpu->kernel_fills[k];
+            if (e->read_tag == HV_TLB_INVALID && e->exec_tag == HV_TLB_INVALID && e->write_tag == HV_TLB_INVALID) continue;
+            uint64_t tag = e->read_tag != HV_TLB_INVALID ? e->read_tag + HV_TLB_ADJ : e->exec_tag != HV_TLB_INVALID ? hv_exec_key(e->exec_tag, e->addend) : e->write_tag + HV_TLB_ADJ;
+            if (!((tag >> 55) & 1)) continue;
+            uint64_t pg = tag & 0x00ffffffffffffffull;
+            if (pg < hi && pg + PAGE_MASK + 1 > lo) memset(e, 0x80, sizeof *e);
+        }
+        hv_ijc_reset(cpu, 1);
+        return;
+    }
     for (int t = 0; t < 3; t++)
         for (uint32_t i = 0; i < HV_TLB_SIZE; i++) {
             HvTlbEntry *e = hv_tlb_ent(cpu, i, t);

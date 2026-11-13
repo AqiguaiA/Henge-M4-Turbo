@@ -125,6 +125,15 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
 
 @class HvContext;
 
+typedef struct {
+    uint32_t task;
+    uint32_t ref;
+    __unsafe_unretained HvObject *obj;
+} HvObjCacheSlot;
+
+#define HV_OBJ_CACHE_SIZE 4096u
+#define HV_OBJ_CACHE_HASH(task, ref) ((((task) * 2654435761u) ^ (ref)) & (HV_OBJ_CACHE_SIZE - 1u))
+
 @interface HvReplay : NSObject {
 @public
     HvPvgLite *lite;
@@ -132,6 +141,7 @@ enum { OBJ_BUFFER = 1, OBJ_TEXTURE = 2, OBJ_FUNCTION = 6, OBJ_SERIALIZED = 7, OB
     id<MTLCommandQueue> queue;
     dispatch_queue_t worker;
     NSMutableDictionary<NSNumber *, NSMutableDictionary<NSNumber *, HvObject *> *> *tasks;
+    HvObjCacheSlot obj_cache[HV_OBJ_CACHE_SIZE];
     NSMutableDictionary<NSNumber *, id<MTLTexture>> *mapped_textures;
     NSMutableDictionary<NSNumber *, HvObject *> *surfaces;
     /* Multi-plane surfaces' host IOSurfaces by the guest memory they stand for: each process maps a surface
@@ -1110,9 +1120,14 @@ static void sync_iosurface(HvObject *s) {
     uint64_t list = hv_pvg_lite_task_objects(lite, task);
     uint32_t e[3];
     if (!list || hv_pvg_lite_task_read(lite, task, list + (uint64_t)ref * 12, e, 12)) return nil;
-    NSMutableDictionary *objs = tasks[@(task)];
-    if (!objs) tasks[@(task)] = objs = [NSMutableDictionary new];
-    HvObject *o = objs[@(ref)];
+    HvObjCacheSlot *slot = &obj_cache[HV_OBJ_CACHE_HASH(task, ref)];
+    HvObject *o = (slot->obj && slot->task == task && slot->ref == ref) ? slot->obj : nil;
+    NSMutableDictionary *objs = nil;
+    if (!o) {
+        objs = tasks[@(task)];
+        if (!objs) tasks[@(task)] = objs = [NSMutableDictionary new];
+        o = objs[@(ref)];
+    }
     if (o && !memcmp(o->entry, e, 12)) {
         /* macOS 14's driver names a surface before it writes the surface's description: try again a while.
            And it reuses surface ids: a texture over a surface that has since been replaced is made again. */
@@ -1125,20 +1140,31 @@ static void sync_iosurface(HvObject *s) {
             HvObject *again = [HvObject new];
             memcpy(again->entry, e, 12);
             again->retries = tries;
+            if (!objs) {
+                objs = tasks[@(task)];
+                if (!objs) tasks[@(task)] = objs = [NSMutableDictionary new];
+            }
             objs[@(ref)] = again;
+            slot->task = task; slot->ref = ref; slot->obj = again;
             uint64_t at = (uint64_t)e[2] << 32 | e[1];
             [self makeMappedTexture:again at:at task:task];
             static int told;
             if (again->object && told++ < 30) fprintf(stderr, "hengevm: pvg-metal: task %u ref %u: texture made on try %u%s\n", task, ref, tries, replaced ? " (surface replaced)" : "");
             return again;
         }
+        slot->task = task; slot->ref = ref; slot->obj = o;
         if (!o->follows) return o;
         if (o->follows->mapped) refresh_pages(self, task, o->follows);
         if (o->follows->generation == o->follows_generation) return o;
     }
+    if (!objs) {
+        objs = tasks[@(task)];
+        if (!objs) tasks[@(task)] = objs = [NSMutableDictionary new];
+    }
     o = [HvObject new];
     memcpy(o->entry, e, 12);
     objs[@(ref)] = o;
+    slot->task = task; slot->ref = ref; slot->obj = o;
     uint32_t type = e[0] & 0xff, size = e[0] >> 8;
     uint64_t at = (uint64_t)e[2] << 32 | e[1];
     switch (type) {
@@ -1229,11 +1255,18 @@ static BOOL has_guest_pages(HvObject *o) {
     if (n < 8) return;
     uint32_t task = a[0], count = a[1];
     if (n < 8 + count * 4ull) return;
-    NSMutableDictionary *objs = tasks[@(task)];
+    NSMutableDictionary *objs = nil;
     id<MTLCommandBuffer> cb = nil;
     id<MTLBlitCommandEncoder> blit = nil;
     for (uint32_t i = 0; i < count; i++) {
-        HvObject *o = objs[@(a[2 + i])];
+        uint32_t ref = a[2 + i];
+        HvObjCacheSlot *slot = &obj_cache[HV_OBJ_CACHE_HASH(task, ref)];
+        HvObject *o = (slot->obj && slot->task == task && slot->ref == ref) ? slot->obj : nil;
+        if (!o) {
+            if (!objs) objs = tasks[@(task)];
+            o = objs[@(ref)];
+            if (o) { slot->task = task; slot->ref = ref; slot->obj = o; }
+        }
         if (!o || !o->guest_backed || !o->host_valid) continue;
         if (!cb) cb = [queue commandBuffer];
         [self page:o toGuest:YES task:task blit:&blit commandBuffer:cb];
@@ -1249,10 +1282,18 @@ static BOOL has_guest_pages(HvObject *o) {
 /* {task, count, {ref, host invalid, host valid, guest invalid, guest valid}}. */
 - (void)invalidate:(const uint32_t *)a length:(uint32_t)n {
     if (n < 8 || n < 8 + a[1] * 8ull) return;
-    NSMutableDictionary *objs = tasks[@(a[0])];
+    uint32_t task = a[0];
+    NSMutableDictionary *objs = nil;
     const uint8_t *e = (const uint8_t *)(a + 2);
     for (uint32_t i = 0; i < a[1]; i++, e += 8) {
-        HvObject *o = objs[@(*(const uint32_t *)e)];
+        uint32_t ref = *(const uint32_t *)e;
+        HvObjCacheSlot *slot = &obj_cache[HV_OBJ_CACHE_HASH(task, ref)];
+        HvObject *o = (slot->obj && slot->task == task && slot->ref == ref) ? slot->obj : nil;
+        if (!o) {
+            if (!objs) objs = tasks[@(task)];
+            o = objs[@(ref)];
+            if (o) { slot->task = task; slot->ref = ref; slot->obj = o; }
+        }
         if (!o) continue;
         if (e[6]) o->guest_stale = YES;
         if (e[7]) o->guest_stale = NO;
@@ -2735,6 +2776,7 @@ void hv_pvg_metal_destroy(HvPvgMetal *m) {
         /* GPU completions may have enqueued a final readback on the worker. */
         dispatch_sync(r->worker, ^{
             r->lite = NULL;
+            memset(r->obj_cache, 0, sizeof r->obj_cache);
             r->tasks = nil;
             r->surfaces = nil;
             r->mapped_textures = nil;
@@ -2781,6 +2823,8 @@ void hv_pvg_metal_submit(HvPvgMetal *m, HvPvgLite *lite, uint32_t ch, uint32_t *
                     } else [r complain:[NSString stringWithFormat:@"command 0x37 of %u bytes: %u resources, %u buffers do not fit", n, nres, nbuf]];
                 } else if ((op == 0x25 || op == 0x28) && n >= 8) { /* {task, ref} or {task, tag, size, ref} */
                     uint32_t ref = op == 0x25 ? args[1] : (n >= 16 ? args[3] : 0);
+                    HvObjCacheSlot *slot = &r->obj_cache[HV_OBJ_CACHE_HASH(args[0], ref)];
+                    if (slot->task == args[0] && slot->ref == ref) slot->obj = nil;
                     [r->tasks[@(args[0])] removeObjectForKey:@(ref)];
                 } else if (op == 0x35 || op == 0x3e) {
                     [r synchronize:args length:n];
@@ -2790,7 +2834,11 @@ void hv_pvg_metal_submit(HvPvgMetal *m, HvPvgLite *lite, uint32_t ch, uint32_t *
                     /* "May be thrown away": Apple's host only marks it purgeable, and the bytes stay
                        until the system needs the memory. Here they just stay. */
                 } else if (op == 0x20 && n >= 4) {
-                    [r->tasks removeObjectForKey:@(args[0] >> 1)];
+                    uint32_t dead_task = args[0] >> 1;
+                    for (uint32_t idx = 0; idx < HV_OBJ_CACHE_SIZE; idx++)
+                        if (r->obj_cache[idx].obj && r->obj_cache[idx].task == dead_task)
+                            r->obj_cache[idx].obj = nil;
+                    [r->tasks removeObjectForKey:@(dead_task)];
                 } else {
                     hv_pvg_lite_command(lite, cmd, len);
                     if (op == 8 && n >= 16) {

@@ -1,0 +1,82 @@
+# .github/workflows/build-ipa.yml
+#
+# Builds an Apple M4 optimized Henge-Turbo.ipa on GitHub-hosted Xcode runners
+# with -O3 -mcpu=apple-m4 and all 6 architectural optimizations enabled.
+
+name: Build Henge M4-Turbo IPA
+
+on:
+  workflow_dispatch: {}
+
+env:
+  HUSK: ${{ github.workspace }}/Husk
+  IOS_DEPS: ${{ github.workspace }}/Husk/build/ios-arm64/sysroot
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out Henge
+        uses: actions/checkout@v4
+        with:
+          path: Henge
+
+      - name: Check out Husk
+        uses: actions/checkout@v4
+        with:
+          repository: Leviidev/Husk
+          path: Husk
+
+      - name: Cache Husk dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            Husk/third_party/build
+            Husk/build
+          key: husk-ios-arm64-${{ hashFiles('Husk/scripts/build_ios.sh', 'Husk/scripts/fetch_sources.sh') }}
+
+      - name: Install build tools
+        run: |
+          set -euxo pipefail
+          brew install xcodegen meson ninja pkg-config
+          rustup target add aarch64-apple-ios || {
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            rustup target add aarch64-apple-ios
+          }
+
+      - name: Fetch Husk sources
+        working-directory: Husk
+        run: bash scripts/fetch_sources.sh
+
+      - name: Build iOS sysroot deps
+        working-directory: Husk
+        run: bash scripts/build_ios.sh libffi glib libslirp
+
+      - name: Build Husk pairing library
+        working-directory: Husk
+        run: bash scripts/build_rppairing_ios.sh
+
+      - name: Copy prebuilt deps into Henge
+        working-directory: Henge
+        run: zsh ios/scripts/fetch_deps.sh
+
+      - name: Build restore stack
+        working-directory: Henge
+        run: zsh tools/build_ios_restore.sh
+
+      - name: Build M4-Turbo engine (-O3 -mcpu=apple-m4)
+        working-directory: Henge
+        run: make ios-lib IOS_CFLAGS="-std=c11 -Wall -Wextra -O3 -mcpu=apple-m4 -g -Icore -Ihost -Idevices -I${IOS_DEPS}/include/slirp"
+
+      - name: Package Henge.ipa
+        working-directory: Henge
+        run: zsh ios/scripts/package_ipa.sh
+
+      - name: Upload Henge-M4-Turbo.ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: Henge-M4-Turbo-ipa-${{ github.sha }}
+          path: /Users/runner/Desktop/Henge.ipa
+          if-no-files-found: error

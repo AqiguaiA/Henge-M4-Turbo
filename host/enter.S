@@ -63,12 +63,7 @@
     str x29, [x28, #232]
 .endm
 
-// Uses x0 as a temporary, so x0 must already be saved.
-.macro SAVE_FLAGS_FP
-    mrs x0, nzcv
-    str x0, [x28, #CPU_NZCV]
-    stp q0, q1, [x28, #320]
-    stp q2, q3, [x28, #352]
+.macro SAVE_Q4_Q31
     stp q4, q5, [x28, #384]
     stp q6, q7, [x28, #416]
     stp q8, q9, [x28, #448]
@@ -85,12 +80,7 @@
     stp q30, q31, [x28, #800]
 .endm
 
-// Uses x0 and x1 as temporaries. FPCR and FPSR are not here: reading or writing
-// them stalls the pipeline, so the guest's values simply stay in the host
-// registers for as long as hv_run runs (see hv_fp_enter/hv_fp_leave).
-.macro LOAD_FLAGS_FP
-    ldp q0, q1, [x28, #320]
-    ldp q2, q3, [x28, #352]
+.macro LOAD_Q4_Q31
     ldp q4, q5, [x28, #384]
     ldp q6, q7, [x28, #416]
     ldp q8, q9, [x28, #448]
@@ -105,6 +95,24 @@
     ldp q26, q27, [x28, #736]
     ldp q28, q29, [x28, #768]
     ldp q30, q31, [x28, #800]
+.endm
+
+// Uses x0 as a temporary, so x0 must already be saved.
+.macro SAVE_FLAGS_FP
+    mrs x0, nzcv
+    str x0, [x28, #CPU_NZCV]
+    stp q0, q1, [x28, #320]
+    stp q2, q3, [x28, #352]
+    SAVE_Q4_Q31
+.endm
+
+// Uses x0 and x1 as temporaries. FPCR and FPSR are not here: reading or writing
+// them stalls the pipeline, so the guest's values simply stay in the host
+// registers for as long as hv_run runs (see hv_fp_enter/hv_fp_leave).
+.macro LOAD_FLAGS_FP
+    ldp q0, q1, [x28, #320]
+    ldp q2, q3, [x28, #352]
+    LOAD_Q4_Q31
     ldr x0, [x28, #CPU_NZCV]
     msr nzcv, x0
 .endm
@@ -188,14 +196,29 @@ _hv_helper_entry:
     str x2, [x28, #CPU_SP]
     ldr x2, [x28, #CPU_HOST_SP]
     mov sp, x2
-    SAVE_FLAGS_FP
-    mov x0, x28
+    mrs x0, nzcv
+    str x0, [x28, #CPU_NZCV]
+    stp q0, q1, [x28, #320]
+    stp q2, q3, [x28, #352]
+    // Lazy SIMD/FP: non-MEM helpers (SVC, ERET, MSR/MRS, TLBI, WFE) never touch q4..q31.
+    // w19 is callee-saved on the host and guest x19 is already saved in HvCpu.
+    ldrb w19, [x1, #12]
+    cmp w19, #1
+    b.ne 2f
+    SAVE_Q4_Q31
+2:  mov x0, x28
     bl _hv_helper
-    cbnz w0, Lrestore_host
+    cbnz w0, Lsave_q4_q31_exit
     ldr x15, [x28, #CPU_HELPER_RET]
     ldr x0, [x28, #CPU_HELPER_FROM]
     eor x15, x15, x0
-    LOAD_FLAGS_FP
+    ldp q0, q1, [x28, #320]
+    ldp q2, q3, [x28, #352]
+    cmp w19, #1
+    b.ne 3f
+    LOAD_Q4_Q31
+3:  ldr x0, [x28, #CPU_NZCV]
+    msr nzcv, x0
     LOAD_X1_X30
     ldr x0, [x28, #CPU_SP]
     mov sp, x0
@@ -209,6 +232,12 @@ _hv_helper_entry:
     ldr x0, [x28]
     isb                           // the next block may be one another CPU just wrote (see hv_enter)
     ret x15
+
+Lsave_q4_q31_exit:
+    cmp w19, #1
+    b.eq Lrestore_host
+    SAVE_Q4_Q31
+    b Lrestore_host
 
 // Shared tails of translated code, so each call site is a few words (the
 // stub's data follows its blr; blocks reach these through HvCpu, not BL, since
