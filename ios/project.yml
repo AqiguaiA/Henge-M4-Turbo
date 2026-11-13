@@ -116,7 +116,9 @@ targets:
         script: |
           set -e
           cd "$SRCROOT/.."
-          make ios-lib build/henge-agent.gz build/tl-samples.dmg
+          make ios-lib build/henge-agent.gz
+          # The sample Mac programs target macOS; xcodebuild's SDKROOT=iphoneos must not leak in.
+          env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET make build/tl-samples.dmg
           ./tools/build_ios_restore.sh
         basedOnDependencyAnalysis: false
     postBuildScripts:

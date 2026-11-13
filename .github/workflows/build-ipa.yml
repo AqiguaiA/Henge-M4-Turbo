@@ -70,12 +70,27 @@ jobs:
         working-directory: Henge
         run: make ios-lib IOS_CFLAGS="-std=c11 -Wall -Wextra -O3 -mcpu=apple-m4 -g -Icore -Ihost -Idevices -I${IOS_DEPS}/include/slirp"
 
-      - name: Patch iPhoneOS SDK NSURLHandle.h (Xcode 27 SDK bug)
+      - name: Patch iPhoneOS SDK Foundation headers (Xcode 27 SDK bug)
         working-directory: Henge
         run: |
+          set -euxo pipefail
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          sudo cp ios/shim/Foundation/NSURLHandle.h "$SDK/System/Library/Frameworks/Foundation.framework/Headers/NSURLHandle.h"
-          ls -l "$SDK/System/Library/Frameworks/Foundation.framework/Headers/NSURLHandle.h"
+          MACSDK=$(xcrun --sdk macosx --show-sdk-path)
+          H="$SDK/System/Library/Frameworks/Foundation.framework/Headers"
+          MH="$MACSDK/System/Library/Frameworks/Foundation.framework/Headers"
+          sudo cp ios/shim/Foundation/NSURLHandle.h "$H/NSURLHandle.h"
+          # The iPhoneOS SDK's own Foundation umbrella imports headers it does not
+          # ship (NSGeometry.h and 40-odd others). Fill every gap from the macOS
+          # SDK of the same Xcode; extra Mac-only headers are inert on iOS.
+          for f in "$MH"/*.h; do
+            b=$(basename "$f")
+            [ -f "$H/$b" ] || sudo cp "$f" "$H/$b"
+          done
+          printf '%s\n' '#import <Foundation/Foundation.h>' 'int henge_sdk_check(void){return 0;}' > /tmp/sdkcheck.m
+          clang -arch arm64 -miphoneos-version-min=17.0 -isysroot "$SDK" -fsyntax-only /tmp/sdkcheck.m
+          printf '%s\n' 'import Foundation' 'public func hengeSDKCheck() {}' > /tmp/sdkcheck.swift
+          xcrun --sdk iphoneos swiftc -target arm64-apple-ios17.0 -sdk "$SDK" -emit-object /tmp/sdkcheck.swift -o /tmp/sdkcheck.o
+          echo "SDK Foundation headers patched and verified"
 
       - name: Package Henge.ipa
         working-directory: Henge
