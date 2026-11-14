@@ -2,24 +2,55 @@
   <img src="docs/icon.png" width="120" height="120" alt="Henge">
 </p>
 
-<h1 align="center">Henge</h1>
+<h1 align="center">Henge M4-Turbo</h1>
 
-<p align="center">macOS on your iPhone and iPad.</p>
+<p align="center">macOS on your iPhone and iPad — tuned with <code>-O3 -mcpu=apple-m4</code> &amp; JIT/MMU/I/O optimizations for M4 iPad Pro (iPadOS 27.2).</p>
 
 <p align="center">
+  <a href="#m4-turbo-optimizations--fixes-apple-m4-ipad-pro--ipados-272">M4-Turbo Optimizations</a>
+  ·
   <a href="#install">Install</a>
   ·
   <a href="docs/architecture.md">How it works</a>
   ·
-  <a href="https://itslevii.dev">Website</a>
+  <a href="https://github.com/AqiguaiA/Henge-M4-Turbo/actions">Actions Builds</a>
   ·
-  <a href="https://github.com/Leviidev/Henge/releases">Releases</a>
+  <a href="https://github.com/Leviidev/Henge">Upstream</a>
 </p>
 
 <p align="center">
   <a href="https://github.com/Leviidev/Henge/releases"><img src="https://img.shields.io/github/downloads/Leviidev/Henge/total?style=flat-square&color=2E6BFF&labelColor=111111" alt="Downloads"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/Leviidev/Henge?style=flat-square&color=2E6BFF&labelColor=111111" alt="GPL-2.0-or-later"></a>
 </p>
+
+## M4-Turbo Optimizations & Fixes (Apple M4 iPad Pro / iPadOS 27.2)
+
+本仓库基于 [Leviidev/Henge](https://github.com/Leviidev/Henge) 构建，面向 **非越狱 Apple M4 iPad Pro（iPadOS 27.2）** 进行针对性引擎性能优化、稳定性格外审计修复与免费签名打包适配：
+
+### 1. M4-Turbo 引擎与图形栈核心优化（Fork Enhancements）
+1. **Apple M4 全栈优化编译与性能核调度**：iOS 引擎静态库采用 `-O3 -mcpu=apple-m4` 编译（[`.github/workflows/build-ipa.yml`](.github/workflows/build-ipa.yml)），`host/vm.c` 与 `devices/pvg_metal.m` 将 guest vCPU 及 Metal 回放队列调度至 `QOS_CLASS_USER_INTERACTIVE`，优先锁定 M4 P-Core。
+2. **默认高性能转译参数与超块扩容**：默认开启 `HV_SUPERBLOCKS=1`、`HV_WFI_SPIN=50`、`HV_FLUSH=2`（`F_BARRIERFSYNC`）、`HV_HZ=60`、`HV_STATS=0`，并默认 `HV_RECHECK=0`；`go_on()`（[`core/translate.c`](core/translate.c)）将超块（Superblock）单块上限由 `48` 提升至 **`96`** 条指令，扩大跨条件分支直线/热路径编译窗口。
+3. **`CLREX` 零陷出内联发射**：`core/translate.c` 对 `HV_INSN_BARRIER` (`CLREX`) 直接内联写入 `cpu->excl_addr`（`movn x6, #0` + `str x6, [x28, #HV_CPU_EXCL_ADDR]`），避免每次 `CLREX` 陷入 `hv_helper`。
+4. **零 Spill PAC 指针剥离（`put_strip()`）**：`core/translate.c` 在运行期按地址 `bit 55` 符号扩展 `bits 54..48`，非 stolen 寄存器仅通过宿主机暂存寄存器 `x6` 发射 2 条指令完成剥离，零寄存器 Spill 且同时兼容 EL0/EL1 地址空间。
+5. **64/128-bit 独占对访存快路径与 `translate_excl()` 统一收口**：`core/translate.c` 将单字（`LDXR`/`STXR` 等）与成对（`LDXP`/`STXP` 等）独占访存统一至 `translate_excl()`，在 TLB 命中与对齐校验通过后，仅用宿主机空闲暂存寄存器 `x6`/`x7`/`x15` 执行 `LDP` 与原生 `CASAL`/`CASPAL`；结合原有 `HV_IJC_BITS=18` 间接跳转缓存（`cpu->ijc_tab[]`）与零陷入系统寄存器快路径（`TPIDR_EL0`/`TPIDRRO_EL0`/`NZCV`/`CNTVCT_EL0` 等），显著降低原子锁与上下文热点开销。
+6. **软件 MMU 内核范围快扫与 `PVGMetal` 直达对象缓存**：
+   - `core/mmu.c` 的 `hv_tlb_flush_kernel_range()` 将逐页扫描阈值调为 256 页（4 MB），超出时若 `cpu->nkernel_fills <= HV_KERNEL_FILLS` 则仅扫描已填充索引 `cpu->kernel_fills[]`，避免全表扫描；
+   - `devices/pvg_metal.m` 的 `HvReplay` 新增 4096 槽位 C 级哈希缓存 `obj_cache[]`（`HV_OBJ_CACHE_SIZE = 4096`），绕过 `NSNumber` 装箱与双层 `NSMutableDictionary` 查找热路径。
+
+### 2. 关键正确性与稳定性修复（Round 1 & Round 2 Audit Fixes）
+- **独占访存监视器与异常注入统一修复**：`translate_excl()` 先完成对齐与 TLB 权限校验再更新目标寄存器及独占监视器（`excl_addr` 与 `excl_size`），完整处理 `XZR` 与 stolen 寄存器冲突；`core/memop.c` 的 `do_exclusive()` 在物理写失败时按架构语义注入 `HV_FSC_EXTERNAL` Data Abort，不再静默吞掉总线错误。
+- **Helper 全量浮点与条件码上下文保护**：[`host/enter.S`](host/enter.S) 中 `_hv_helper_entry` 在进入 `hv_helper` 前后使用 `SAVE_FLAGS_FP` / `LOAD_FLAGS_FP` 完整保存与恢复 Guest 的全部 `q0..q31` SIMD/FP 寄存器及 `NZCV` 条件码，配合 [`Makefile`](Makefile) 中 `mmu.o` 与 `exception.o` 的 `-mgeneral-regs-only` 编译约束，彻底避免 `-O3 -mcpu=apple-m4` 自动向量化破坏 Guest 状态（已新增 `test_helper_regs` 验证）。
+- **内核高端虚拟地址 64 位回绕修复**：修正 `core/mmu.c` 与 `core/sysreg.c` 中当内核 VA 区间终点位于 `0xffffffffffffffff` 时进行 `+ 1` 计算导致的 64 位无符号整数溢出回绕缺陷（`test_mmu` 新增覆盖测试）。
+- **`EngineTuning` 环境变量生命周期修正**：[`ios/Henge/EngineTuning.swift`](ios/Henge/EngineTuning.swift) 关闭开关时显式写入 `HV_SUPERBLOCKS=0`（避免被默认启用覆盖），并追踪 `appliedKeys` 以便在重新应用 `Documents/henge-env.txt` 时自动 `unsetenv` 已删除的键值（已新增 `test_engine_tuning` 验证）。
+- **iPadOS 27.2 (TXM) 免费个人签名与 JIT 引导适配**：CI 默认使用 [`ios/Henge/Henge.personal.entitlements`](ios/Henge/Henge.personal.entitlements)（仅保留 `get-task-allow` 与 `com.apple.developer.kernel.increased-memory-limit`），避免免费 Apple ID 安装出现 `-80045` 并满足 iPadOS 27.2 TXM 校验，配合 StikDebug / StikJIT 引导启用设备端 JIT。
+
+### 3. GitHub Actions 自动构建与下载
+每次推送至 `main` 分支或手动触发 [`.github/workflows/build-ipa.yml`](.github/workflows/build-ipa.yml) 时，将在 `xcode-27` macOS Runner 上自动执行以下流程：
+1. 运行 Swift 测试 `make test-engine-tuning` 与 9 项核心 C/汇编单元测试（`test_classify`、`test_jit_region`、`test_operands`、`test_helper_regs`、`test_mmu`、`test_jit`、`test_mem`、`test_exc`、`test_shutdown`）。
+2. 使用 `-O3 -mcpu=apple-m4` 编译 `libhengevm.a` 并通过 Xcode 27 + [`ios/scripts/package_ipa.sh`](ios/scripts/package_ipa.sh) 打包。
+3. 在对应 [Actions Run](https://github.com/AqiguaiA/Henge-M4-Turbo/actions) 页面底部 **Artifacts** 中上传 `Henge-M4-Turbo-ipa-<sha>`（内含可直接侧载安装的 `Henge.ipa`）。
+
+---
 
 Download macOS, install it on the device, and use it.
 

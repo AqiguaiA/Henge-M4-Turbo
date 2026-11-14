@@ -65,9 +65,8 @@ $(B)/hengevm: host/main.c $(ENGINE) $(DEV) $(B)/pvg_mac.o $(B)/net_slirp.o $(B)/
 	    -framework Foundation -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers -framework CoreFoundation \
 	    -framework AppKit -framework QuartzCore -o $@
 
-# mmu.c: no SIMD (hv_tlb_refill runs with the guest's SIMD registers live). exception.c and sysreg.c
-# likewise: no FP in them, and at -O3 nothing may auto-vectorize into q4..q31 while the helper runs.
-$(B)/mmu.o $(B)/exception.o $(B)/sysreg.o: $(B)/%.o: core/%.c core/*.h host/*.h | $(B)
+# mmu.c and exception.c: no SIMD (hv_tlb_refill and page-fault exceptions run from _hv_tlb_miss_entry with q4..q31 live).
+$(B)/mmu.o $(B)/exception.o: $(B)/%.o: core/%.c core/*.h host/*.h | $(B)
 	$(CC) $(CFLAGS) -mgeneral-regs-only -c $< -o $@
 $(B)/%.o: core/%.c core/*.h host/*.h | $(B)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -139,7 +138,7 @@ IOS_SRC = $(wildcard core/*.c) host/prof_ios.c host/jit_region.c host/disk.c hos
           $(filter-out devices/pvg_mac.m,$(wildcard devices/*.c))
 IOS_OBJ = $(patsubst %.c,$(IB)/%.o,$(IOS_SRC)) $(IB)/host/enter.o $(IB)/devices/pvg_metal.o
 
-$(IB)/core/mmu.o $(IB)/core/exception.o $(IB)/core/sysreg.o: $(IB)/core/%.o: core/%.c core/*.h host/*.h devices/*.h
+$(IB)/core/mmu.o $(IB)/core/exception.o: $(IB)/core/%.o: core/%.c core/*.h host/*.h devices/*.h
 	@mkdir -p $(dir $@)
 	$(IOS_CC) $(IOS_CFLAGS) -mgeneral-regs-only -c $< -o $@
 $(IB)/%.o: %.c core/*.h host/*.h devices/*.h
