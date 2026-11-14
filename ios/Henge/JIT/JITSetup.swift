@@ -178,7 +178,7 @@ final class JITCoordinator: ObservableObject {
             enable()
             return
         }
-        guard !autoTried, UserDefaults.standard.bool(forKey: Self.autoEnableKey) else { return }
+        guard !autoTried, (UserDefaults.standard.object(forKey: Self.autoEnableKey) as? Bool) ?? true else { return } // M4 Turbo: on unless turned off
         autoTried = true
         guard !JITBootstrap.ready else { return }
         guard HengeBuiltInJIT.isAvailable, hasPairing else {

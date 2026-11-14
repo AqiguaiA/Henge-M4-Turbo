@@ -13,17 +13,19 @@ enum EngineTuning {
         // 60, not 120: every frame macOS draws is emulated and replayed, so 120 Hz
         // halves the CPU left for apps for animation few will notice.
         "HV_HZ": "60",         // the refresh rate macOS is told its display has
-        "HV_WFI_SPIN": "0",    // microseconds an idle CPU watches for work before sleeping
+        "HV_WFI_SPIN": "50",   // microseconds an idle CPU watches for work before sleeping (M4 Turbo: on)
+        "HV_SUPERBLOCKS": "1", // a conditional branch does not end its block (M4 Turbo: on)
         "HV_FLUSH": "2",       // disk flush: F_BARRIERFSYNC, ordered but without a full fsync
-        "HV_STATS": "10",      // seconds between engine stats lines in the log; 0 = off
+        "HV_STATS": "0",       // seconds between engine stats lines in the log; 0 = off (stats cost CPU)
     ]
 
     static func apply() {
         var env = defaults
         let d = UserDefaults.standard
         if [30, 120].contains(d.integer(forKey: refreshKey)) { env["HV_HZ"] = String(d.integer(forKey: refreshKey)) }
-        if d.bool(forKey: superblocksKey) { env["HV_SUPERBLOCKS"] = "1" } else { unsetenv("HV_SUPERBLOCKS") }
-        if d.bool(forKey: wfiSpinKey) { env["HV_WFI_SPIN"] = "50" }
+        // On unless turned off in Settings (an unset key reads as on).
+        if d.object(forKey: superblocksKey) as? Bool == false { env.removeValue(forKey: "HV_SUPERBLOCKS"); unsetenv("HV_SUPERBLOCKS") }
+        if d.object(forKey: wfiSpinKey) as? Bool == false { env["HV_WFI_SPIN"] = "0" }
         if d.object(forKey: fastFlushKey) as? Bool == false { env["HV_FLUSH"] = "0" }
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         // GPU command trace: on while Documents/trace-on exists (it is checked every frame, so it can be toggled live).

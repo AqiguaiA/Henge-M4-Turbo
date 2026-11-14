@@ -373,7 +373,7 @@ void hv_vm_cpu_qos(void) {
     /* HV_QOS=ui|init|default (testing): the class the guest's CPUs run at. */
     const char *q = getenv("HV_QOS");
 #if TARGET_OS_IPHONE
-    qos_class_t c = QOS_CLASS_USER_INITIATED;
+    qos_class_t c = QOS_CLASS_USER_INTERACTIVE; /* M4 Turbo: keep the guest CPUs on performance cores */
 #else
     qos_class_t c = QOS_CLASS_DEFAULT;
 #endif

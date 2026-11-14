@@ -662,23 +662,12 @@ static void translate_pcrel(Emit *e, uint32_t insn, uint64_t pc) {
 
 /* Bits 54..48 take bit 55's value. Guest pointers are never signed, so for a
    canonical pointer this changes nothing; it only clears a stray PAC field.
-   Fast path: in EL0, bit 55 is always 0 -> single AND imm (0xff80ffffffffffff);
-   in EL1 for LR (x30), bit 55 is 1 -> single ORR imm (0x007f000000000000);
-   otherwise zero-spill using always-free scratch x6/x7 (host x6, x7, x15 are
-   reserved for scratch and guest x6/x7/x15 live in HvCpu). */
+   Zero-spill: host x6/x7 are always-free scratch (guest x6/x7/x15 live in the HvCpu). */
 static void put_strip(Emit *e, int r) {
     if (r == 31) return;
     if (!is_stolen(r)) {
-        if (!(e->flags & HV_BLOCK_EL1)) {
-            /* and xr, xr, #0xff80ffffffffffff (N=1, immr=16, imms=56) */
-            put(e, 0x9249e000u | (uint32_t)r << 5 | (uint32_t)r);
-            return;
-        }
-        if (r == 30) {
-            /* orr x30, x30, #0x007f000000000000 (N=1, immr=16, imms=6) */
-            put(e, 0xb2501bdeu);
-            return;
-        }
+        /* Bit 55 is not known at translation time (EL1 code strips user pointers too, and EL0 may hold
+           anything), so copy it at run time: 2 words, host x6 is free scratch, nothing spilled. */
         put(e, SBFM_X(6, r, 55, 55));
         put(e, BFM_X(r, 6, 16, 6));
         return;
@@ -903,7 +892,9 @@ static void translate_excl(Emit *e, uint32_t insn, uint64_t pc) {
     uint32_t size = insn >> 30;
     int rn = (insn >> 5) & 0x1f, rt = insn & 0x1f, rs = (insn >> 16) & 0x1f;
     int load = (insn >> 22) & 1;
-    if (!load && (rs == 31 || rs == rt || rs == rn)) { /* the status register is the CAS's compare value: keep these in C */
+    /* LDXR into XZR: nowhere to stage the value without a spill slot the refill thunk also uses; C does it.
+       STXR: the status register is the CAS's compare value: keep these in C. */
+    if ((load && rt == 31) || (!load && (rs == 31 || rs == rt || rs == rn))) {
         put_helper(e, pc, insn, HV_OP_MEM);
         return;
     }
@@ -919,19 +910,6 @@ static void translate_excl(Emit *e, uint32_t insn, uint64_t pc) {
         put(e, STR_X(a, 28, HV_CPU_EXCL_ADDR));
         put(e, 0x52800006u | (1u << size) << 5);                /* movz w6, #bytes */
         put(e, 0xb9000000u | (HV_CPU_EXCL_SIZE / 4) << 10 | 28 << 5 | 6); /* str w6, [x28, #excl_size] */
-        if (rt == 31) {
-            /* Fix LDXR WZR/XZR: route through guest x6 (temporarily saved in spill[3]) so excl_val records the real loaded value. */
-            put(e, LDR_X(6, 28, HV_CPU_X(6)));
-            put(e, STR_X(6, 28, HV_CPU_SPILL(3)));
-            if ((insn >> 15) & 1)
-                translate_mem(e, size << 30 | 0x08dffc00u | (uint32_t)rn << 5 | 6u, pc);
-            else
-                translate_mem(e, size << 30 | 0x39400000u | (uint32_t)rn << 5 | 6u, pc);
-            put_store_field(e, 6, HV_CPU_EXCL_VAL);
-            put(e, LDR_X(6, 28, HV_CPU_SPILL(3)));
-            put(e, STR_X(6, 28, HV_CPU_X(6)));
-            return;
-        }
         if ((insn >> 15) & 1) /* LDAXR: keep the acquire (other CPUs' stores must be seen in order) */
             translate_mem(e, size << 30 | 0x08dffc00u | (uint32_t)rn << 5 | (uint32_t)rt, pc); /* ldar{b,h} rt, [rn] */
         else
@@ -965,76 +943,26 @@ static void translate_excl(Emit *e, uint32_t insn, uint64_t pc) {
     patch_branch(&e->w[to_done], (int64_t)e->n - to_done);
 }
 
-/* Inline 128-bit & 64-bit pair exclusives (LDXP/LDAXP and STXP/STLXP). Returns 1 if emitted inline, 0 to fall back to C. */
+/* Inline 64-bit and 128-bit pair exclusives (LDXP/LDAXP, STXP/STLXP). Returns 1 if emitted inline, 0 to
+   leave it to C. Only host x6, x7 and x15 are touched (free scratch: guest x6/x7/x15 live in the HvCpu), so
+   no guest register is borrowed or clobbered. The TLB check is the aligned one (a misaligned pair faults in
+   C), and a miss runs the original instruction in hv_mem_emulate (do_exclusive), which does the whole thing.
+   STXP is a CASPAL (128-bit) or a CASAL of the two words packed (64-bit) against what LDXP saw. */
 static int translate_excl_pair(Emit *e, uint32_t insn, uint64_t pc) {
     uint32_t size = insn >> 30;
-    if (size < 2) return 0;
+    if (size < 2 || hv_knob[HV_K_TEST3]) return 0;
     int rn = (insn >> 5) & 0x1f, rt = insn & 0x1f, rt2 = (insn >> 10) & 0x1f, rs = (insn >> 16) & 0x1f;
     int load = (insn >> 22) & 1;
     int acqrel = (insn >> 15) & 1;
+    int el_idx = !(e->flags & HV_BLOCK_EL1) ? 0 : (e->flags & HV_BLOCK_PAN) ? 2 : 1;
+    uint32_t bytes = 2u << size, k = (uint32_t)__builtin_ctz(bytes); /* 8 or 16 bytes */
     if (load) {
         if (rt == rt2 || rt == 31 || rt2 == 31) return 0;
-        int a = rn;
-        if (rn == 31) {
-            put(e, ADD_SP_TO(15));
-            a = 15;
-        } else if (is_stolen(rn)) {
-            put(e, LDR_X(15, 28, slot_of(rn)));
-            a = 15;
-        }
-        put(e, STR_X(a, 28, HV_CPU_EXCL_ADDR));
-        put(e, 0x52800006u | ((uint32_t)(2u << size)) << 5); /* movz w6, #8 or #16 */
-        put(e, 0xb9000000u | (HV_CPU_EXCL_SIZE / 4) << 10 | 28 << 5 | 6);
-        uint32_t opc = size == 3 ? 2u : 0u; /* LDP 64-bit vs 32-bit */
-        translate_mem(e, (opc << 30) | 0x29400000u | ((uint32_t)rt2 << 10) | ((uint32_t)rn << 5) | (uint32_t)rt, pc);
-        if (acqrel) put(e, 0xd50339bfu); /* dmb ishld */
-        put_store_field(e, rt, HV_CPU_EXCL_VAL);
-        put_store_field(e, rt2, HV_CPU_EXCL_VAL + 8);
-        return 1;
+    } else {
+        if (rs == 31 || rs == rt || rs == rt2 || rs == rn) return 0;
+        if (size == 3 && ((rt & 1) || rt2 != rt + 1 || is_stolen(rt) || is_stolen(rt2))) return 0; /* CASPAL's even pair */
+        if (size == 2 && ((rt != 31 && is_stolen(rt)) || (rt2 != 31 && is_stolen(rt2)))) return 0;
     }
-    /* STXP/STLXP: 128-bit CASPAL (size==3) or 64-bit packed CASAL (size==2) when pairs are even/consecutive/non-stolen. */
-    if (size == 3) {
-        if ((rt & 1) || rt2 != rt + 1 || rt2 == 31 || is_stolen(rt) || is_stolen(rt2) || (rs & 1) || rs + 1 == 31) return 0;
-        if (is_stolen(rs) || is_stolen(rs + 1) || rs == rn || rs + 1 == rn || rs == rt || rs == rt2 || rs + 1 == rt || rs + 1 == rt2)
-            return 0;
-        int a = rn;
-        if (rn == 31) {
-            put(e, ADD_SP_TO(15));
-            a = 15;
-        } else if (is_stolen(rn)) {
-            put(e, LDR_X(15, 28, slot_of(rn)));
-            a = 15;
-        }
-        put(e, LDR_X(6, 28, HV_CPU_EXCL_ADDR));
-        put(e, 0xca000000u | (uint32_t)a << 16 | 6 << 5 | 6); /* eor x6, x6, xa */
-        uint32_t to_fail = e->n;
-        put(e, CBNZ_X(6));
-        put(e, 0x92800006u); /* movn x6, #0 */
-        put(e, STR_X(6, 28, HV_CPU_EXCL_ADDR));
-        put_load_field(e, rs, HV_CPU_EXCL_VAL);
-        put_load_field(e, rs + 1, HV_CPU_EXCL_VAL + 8);
-        /* Host CASPAL Xrs, X(rs+1), Xrt, X(rt+1), [Xrn] (sz=00, L=1, o0=1; 0x4860fc00 is what clang emits for caspal) */
-        translate_mem(e, 0x4860fc00u | ((uint32_t)rs << 16) | ((uint32_t)rn << 5) | (uint32_t)rt, pc);
-        put(e, LDR_X(6, 28, HV_CPU_EXCL_VAL));
-        put(e, 0xca000000u | (uint32_t)rs << 16 | 6 << 5 | 6);
-        put(e, LDR_X(7, 28, HV_CPU_EXCL_VAL + 8));
-        put(e, 0xca000000u | (uint32_t)(rs + 1) << 16 | 7 << 5 | 7);
-        put(e, 0xaa0700c6u); /* orr x6, x6, x7 */
-        uint32_t to_lost = e->n;
-        put(e, CBNZ_X(6));
-        put_const_to(e, rs, 0);
-        uint32_t to_done = e->n;
-        put(e, B_OP);
-        patch_branch(&e->w[to_fail], (int64_t)e->n - to_fail);
-        put(e, 0x92800006u);
-        put(e, STR_X(6, 28, HV_CPU_EXCL_ADDR));
-        patch_branch(&e->w[to_lost], (int64_t)e->n - to_lost);
-        put_const_to(e, rs, 1);
-        patch_branch(&e->w[to_done], (int64_t)e->n - to_done);
-        return 1;
-    }
-    /* 64-bit STXP/STLXP (size == 2): pack {Wrt, Wrt2} into a single 64-bit CASAL via free scratch x15. */
-    if (rs == 31 || rs == rt || rs == rt2 || rs == rn || is_stolen(rs)) return 0;
     int a = rn;
     if (rn == 31) {
         put(e, ADD_SP_TO(15));
@@ -1043,46 +971,79 @@ static int translate_excl_pair(Emit *e, uint32_t insn, uint64_t pc) {
         put(e, LDR_X(15, 28, slot_of(rn)));
         a = 15;
     }
-    put(e, LDR_X(6, 28, HV_CPU_EXCL_ADDR));
-    put(e, 0xca000000u | (uint32_t)a << 16 | 6 << 5 | 6);
-    uint32_t to_fail = e->n;
-    put(e, CBNZ_X(6));
-    put(e, 0x92800006u);
-    put(e, STR_X(6, 28, HV_CPU_EXCL_ADDR));
-    /* Pack desired 64-bit value into rs (using guest x15 as temp): lo32(rt) | (lo32(rt2) << 32) */
-    if (rt == 31) put(e, 0xd2800000u | (uint32_t)rs);
-    else if (is_stolen(rt)) { put(e, LDR_X(6, 28, slot_of(rt))); put(e, 0x2a0603e0u | (uint32_t)rs); }
-    else put(e, 0x2a0003e0u | ((uint32_t)rt << 16) | (uint32_t)rs);
-    if (rt2 != 31) {
-        if (is_stolen(rt2)) put(e, LDR_X(6, 28, slot_of(rt2)));
-        else put(e, MOV_X(6, rt2));
-        put(e, 0xaa068000u | ((uint32_t)rs << 5) | (uint32_t)rs); /* orr xrs, xrs, x6, lsl #32 */
+    /* x6 = the TLB slot; x7 = address - tag, zero only if the same page and aligned (as translate_mem's align check) */
+    uint32_t tlb = put_tlb_slot(e, 6, a, el_idx);
+    put(e, LDR_X(7, 6, tlb + (load ? 0 : 8)));
+    put(e, SUB_X(7, a, 7));
+    put(e, 0xd1000000u | HV_TLB_ADJ << 10 | 7u << 5 | 7u);                   /* sub x7, x7, #ADJ */
+    put(e, 0x92400000u | 50u << 16 | (49u + k) << 10 | 7u << 5 | 7u);       /* and x7, x7, #~(0x3fff & ~(bytes-1)) */
+    put(e, CBNZ_X(7));
+    put_ool(e, (Ool){.kind = OOL_SLOW, .pc = pc, .insn = insn});           /* the original LDXP/STXP, in C */
+    uint32_t slow = e->nool - 1;
+    if (load) {
+        put(e, LDR_X(7, 6, tlb + 24));
+        put(e, ADD_LSL(7, a, 7, 0));                                        /* x7 = host address */
+        put(e, STR_X(a, 28, HV_CPU_EXCL_ADDR));
+        put(e, 0x52800006u | bytes << 5);                                   /* movz w6, #bytes */
+        put(e, 0xb9000000u | (HV_CPU_EXCL_SIZE / 4) << 10 | 28u << 5 | 6u); /* str w6, [x28, #excl_size] */
+        put(e, (size == 3 ? 0xa9400000u : 0x29400000u) | 15u << 10 | 7u << 5 | 6u); /* ldp x6/w6, x15/w15, [x7] */
+        if (acqrel) put(e, 0xd50339bfu);                                    /* dmb ishld: LDAXP's acquire */
+        put(e, STR_X(6, 28, HV_CPU_EXCL_VAL));                              /* (0x400 is past LDP/STP's reach) */
+        put(e, STR_X(15, 28, HV_CPU_EXCL_VAL + 8));
+        if (is_stolen(rt)) put(e, STR_X(6, 28, slot_of(rt)));
+        else put(e, MOV_X(rt, 6));
+        if (is_stolen(rt2)) put(e, STR_X(15, 28, slot_of(rt2)));
+        else put(e, MOV_X(rt2, 15));
+        e->ool[slow].join = e->n;
+        return 1;
     }
-    /* Expected 64-bit value packed into guest x15 slot */
-    put(e, LDR_X(6, 28, HV_CPU_EXCL_VAL));
-    put(e, LDR_X(7, 28, HV_CPU_EXCL_VAL + 8));
-    put(e, 0x2a0603e6u); /* mov w6, w6 */
-    put(e, 0xaa0780c6u); /* orr x6, x6, x7, lsl #32 */
-    put(e, STR_X(6, 28, HV_CPU_X(15)));
-    /* CASAL X15, Xrs, [Xrn] (size=3, L=1, o0=1) */
-    translate_mem(e, 0xc8e0fc00u | (15u << 16) | ((uint32_t)rn << 5) | (uint32_t)rs, pc);
-    put(e, LDR_X(7, 28, HV_CPU_X(15)));
-    put(e, LDR_X(6, 28, HV_CPU_EXCL_VAL));
-    put(e, LDR_X(15, 28, HV_CPU_EXCL_VAL + 8));
-    put(e, 0x2a0603e6u);
-    put(e, 0xaa0f80c6u);
-    put(e, 0xca0700c6u); /* eor x6, x6, x7 */
+    /* The monitor: same address, and an LDXP of this size. */
+    put(e, LDR_X(7, 28, HV_CPU_EXCL_ADDR));
+    put(e, 0xca000000u | (uint32_t)a << 16 | 7u << 5 | 7u);                 /* eor x7, x7, xa */
+    uint32_t to_fail1 = e->n;
+    put(e, CBNZ_X(7));
+    put(e, 0xb9400000u | (HV_CPU_EXCL_SIZE / 4) << 10 | 28u << 5 | 7u);     /* ldr w7, [x28, #excl_size] */
+    uint32_t to_fail2 = e->n;
+    put(e, 0x36000000u | k << 19 | 7u);                                     /* tbz w7, #k, fail (sizes are 1..16) */
+    put(e, LDR_X(7, 6, tlb + 24));
+    put(e, ADD_LSL(15, a, 7, 0));                                           /* x15 = host address */
+    put(e, 0x92800006u);                                                    /* movn x6, #0: the monitor clears either way */
+    put(e, STR_X(6, 28, HV_CPU_EXCL_ADDR));
+    if (size == 3) {
+        put(e, LDR_X(6, 28, HV_CPU_EXCL_VAL));
+        put(e, LDR_X(7, 28, HV_CPU_EXCL_VAL + 8));
+        put(e, 0x4860fc00u | 6u << 16 | 15u << 5 | (uint32_t)rt);           /* caspal x6, x7, xrt, xrt+1, [x15] */
+        put(e, LDR_X(15, 28, HV_CPU_EXCL_VAL));
+        put(e, 0xca0f00c6u);                                                /* eor x6, x6, x15 */
+        put(e, LDR_X(15, 28, HV_CPU_EXCL_VAL + 8));
+        put(e, 0xca0f00e7u);                                                /* eor x7, x7, x15 */
+        put(e, 0xaa0700c6u);                                                /* orr x6, x6, x7 */
+    } else {
+        put(e, 0xb9400000u | (HV_CPU_EXCL_VAL / 4) << 10 | 28u << 5 | 6u);  /* ldr w6, [x28, #excl_val] */
+        put(e, LDR_X(7, 28, HV_CPU_EXCL_VAL + 8));
+        put(e, 0xaa0780c6u);                                                /* orr x6, x6, x7, lsl #32: expected */
+        if (rt == 31) put(e, 0xd2800007u);                                  /* movz x7, #0 */
+        else put(e, 0x2a0003e7u | (uint32_t)rt << 16);                      /* mov w7, wrt */
+        if (rt2 != 31) put(e, 0xaa0080e7u | (uint32_t)rt2 << 16);           /* orr x7, x7, xrt2, lsl #32: desired */
+        put(e, 0xc8e0fc00u | 6u << 16 | 15u << 5 | 7u);                     /* casal x6, x7, [x15] */
+        put(e, 0xb9400000u | (HV_CPU_EXCL_VAL / 4) << 10 | 28u << 5 | 7u);  /* ldr w7, [x28, #excl_val] */
+        put(e, LDR_X(15, 28, HV_CPU_EXCL_VAL + 8));
+        put(e, 0xaa0f80e7u);                                                /* orr x7, x7, x15, lsl #32 */
+        put(e, 0xca0700c6u);                                                /* eor x6, x6, x7 */
+    }
     uint32_t to_lost = e->n;
-    put(e, CBNZ_X(6));
+    put(e, CBNZ_X(6));                                                      /* memory no longer held it: failed */
     put_const_to(e, rs, 0);
     uint32_t to_done = e->n;
     put(e, B_OP);
-    patch_branch(&e->w[to_fail], (int64_t)e->n - to_fail);
+    patch_branch(&e->w[to_fail1], (int64_t)e->n - to_fail1);
+    patch_branch(&e->w[to_fail2], (int64_t)e->n - to_fail2);
     put(e, 0x92800006u);
     put(e, STR_X(6, 28, HV_CPU_EXCL_ADDR));
     patch_branch(&e->w[to_lost], (int64_t)e->n - to_lost);
     put_const_to(e, rs, 1);
     patch_branch(&e->w[to_done], (int64_t)e->n - to_done);
+    e->ool[slow].join = e->n;
     return 1;
 }
 

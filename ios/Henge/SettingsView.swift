@@ -2,7 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject private var jit = JITCoordinator.shared
-    @AppStorage(JITCoordinator.autoEnableKey) private var jitAtLaunch = false
+    @AppStorage(JITCoordinator.autoEnableKey) private var jitAtLaunch = true
     @AppStorage(HardwareMouse.speedKey) private var mouseSpeed = 1.0
     @AppStorage(HardwareMouse.reverseKey) private var reverseScrolling = false
     @AppStorage(HardwareMouse.scrollSpeedKey) private var scrollSpeed = 0.3
@@ -12,8 +12,8 @@ struct SettingsView: View {
     @AppStorage(PhysicalMouseButtons.swapKey) private var swapMouseButtons = false
     @AppStorage(EngineTuning.refreshKey) private var refreshRate = 60
     @AppStorage(EngineTuning.fastFlushKey) private var fastFlush = true
-    @AppStorage(EngineTuning.wfiSpinKey) private var wfiSpin = false
-    @AppStorage(EngineTuning.superblocksKey) private var superblocks = false
+    @AppStorage(EngineTuning.wfiSpinKey) private var wfiSpin = true
+    @AppStorage(EngineTuning.superblocksKey) private var superblocks = true
     @AppStorage(JITBootstrap.codeCacheKey) private var codeCacheMB = JITBootstrap.defaultCodeCacheMB
     @AppStorage(DeskAppearance.key) private var appearance = DeskAppearance.system
     @AppStorage(InstantResume.key) private var instantResume = false

@@ -94,6 +94,9 @@ jobs:
 
       - name: Package Henge.ipa
         working-directory: Henge
+        # Free Apple ID: get-task-allow + increased-memory-limit only (no -80045, TXM-safe).
+        env:
+          HENGE_ENTITLEMENTS: Henge/Henge.personal.entitlements
         run: zsh ios/scripts/package_ipa.sh
 
       - name: Upload Henge-M4-Turbo.ipa
