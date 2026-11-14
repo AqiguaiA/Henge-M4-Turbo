@@ -196,29 +196,14 @@ _hv_helper_entry:
     str x2, [x28, #CPU_SP]
     ldr x2, [x28, #CPU_HOST_SP]
     mov sp, x2
-    mrs x0, nzcv
-    str x0, [x28, #CPU_NZCV]
-    stp q0, q1, [x28, #320]
-    stp q2, q3, [x28, #352]
-    // Lazy SIMD/FP: non-MEM helpers (SVC, ERET, MSR/MRS, TLBI, WFE) never touch q4..q31.
-    // w19 is callee-saved on the host and guest x19 is already saved in HvCpu.
-    ldrb w19, [x1, #12]
-    cmp w19, #1
-    b.ne 2f
-    SAVE_Q4_Q31
-2:  mov x0, x28
+    SAVE_FLAGS_FP
+    mov x0, x28
     bl _hv_helper
-    cbnz w0, Lsave_q4_q31_exit
+    cbnz w0, Lrestore_host
     ldr x15, [x28, #CPU_HELPER_RET]
     ldr x0, [x28, #CPU_HELPER_FROM]
     eor x15, x15, x0
-    ldp q0, q1, [x28, #320]
-    ldp q2, q3, [x28, #352]
-    cmp w19, #1
-    b.ne 3f
-    LOAD_Q4_Q31
-3:  ldr x0, [x28, #CPU_NZCV]
-    msr nzcv, x0
+    LOAD_FLAGS_FP
     LOAD_X1_X30
     ldr x0, [x28, #CPU_SP]
     mov sp, x0
@@ -232,12 +217,6 @@ _hv_helper_entry:
     ldr x0, [x28]
     isb                           // the next block may be one another CPU just wrote (see hv_enter)
     ret x15
-
-Lsave_q4_q31_exit:
-    cmp w19, #1
-    b.eq Lrestore_host
-    SAVE_Q4_Q31
-    b Lrestore_host
 
 // Shared tails of translated code, so each call site is a few words (the
 // stub's data follows its blr; blocks reach these through HvCpu, not BL, since

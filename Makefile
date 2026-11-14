@@ -11,7 +11,7 @@ DEV = $(B)/pvg_lite.o $(B)/pvg_metal.o $(B)/gicv3.o $(B)/timer.o $(B)/pl011.o $(
 ENGINE = $(CORE) $(HOST)
 METAL_LIBS = -framework Foundation -framework QuartzCore -framework Metal -framework IOSurface -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers
 
-TESTS = $(B)/test_classify $(B)/test_jit_region $(B)/test_operands $(B)/test_jit $(B)/test_mem \
+TESTS = $(B)/test_classify $(B)/test_jit_region $(B)/test_operands $(B)/test_jit $(B)/test_helper_regs $(B)/test_mem \
         $(B)/test_mmu $(B)/test_exc $(B)/test_devices $(B)/test_shutdown
 
 all: $(TESTS) $(B)/hengevm $(B)/hengevm-ref $(B)/hvsparse
@@ -83,6 +83,8 @@ $(B)/test_classify: tests/test_classify.c tests/classify_cases.s $(B)/classify.o
 $(B)/test_jit_region: tests/test_jit_region.c $(B)/jit_region.o
 	$(CC) $(CFLAGS) $^ -o $@
 $(B)/test_operands: tests/test_operands.c tests/operand_cases.s $(B)/operands.o
+	$(CC) $(CFLAGS) $^ -o $@
+$(B)/test_helper_regs: tests/test_helper_regs.c tests/helper_regs.S $(B)/enter.o
 	$(CC) $(CFLAGS) $^ -o $@
 $(B)/test_mmu: tests/test_mmu.c $(ENGINE)
 	$(CC) $(CFLAGS) tests/test_mmu.c $(ENGINE) -o $@
@@ -265,3 +267,10 @@ $(B)/test_jit_advice: ios/Henge/JIT/JITNetworkAdvice.swift tests/test_jit_advice
 test-jit-advice: $(B)/test_jit_advice
 	$(B)/test_jit_advice
 .PHONY: test-jit-advice
+
+$(B)/test_engine_tuning: ios/Henge/EngineTuning.swift tests/test_engine_tuning.swift | $(B)
+	xcrun --sdk macosx swiftc $^ -o $@
+
+test-engine-tuning: $(B)/test_engine_tuning
+	$(B)/test_engine_tuning
+.PHONY: test-engine-tuning

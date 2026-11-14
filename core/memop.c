@@ -559,7 +559,11 @@ static int do_exclusive(HvCpu *cpu, const HvMemOp *op, uint64_t va, int el, uint
     int ok = 0;
     if (cpu->excl_addr == va && cpu->excl_size == bytes) {
         if (!host) {
-            ok = !hv_phys_write(cpu->m, pa, &n0, esize) && (!pair || !hv_phys_write(cpu->m, pa + esize, &n1, esize));
+            if (hv_phys_write(cpu->m, pa, &n0, esize) || (pair && hv_phys_write(cpu->m, pa + esize, &n1, esize))) {
+                hv_raise_abort(cpu, 0, va, HV_FSC_EXTERNAL, 1, 0, pc);
+                return 1;
+            }
+            ok = 1;
         } else if (!pair) {
             uint64_t expect = cpu->excl_val[0];
             ok = cas_host(host, op->size, &expect, n0);

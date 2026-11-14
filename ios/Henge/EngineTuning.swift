@@ -8,6 +8,7 @@ enum EngineTuning {
     static let superblocksKey = "henge.perf.superblocks"
     static let wfiSpinKey = "henge.perf.wfiSpin"
     static let fastFlushKey = "henge.perf.fastFlush"
+    private static var appliedKeys = Set<String>()
 
     static let defaults: [String: String] = [
         // 60, not 120: every frame macOS draws is emulated and replayed, so 120 Hz
@@ -24,7 +25,7 @@ enum EngineTuning {
         let d = UserDefaults.standard
         if [30, 120].contains(d.integer(forKey: refreshKey)) { env["HV_HZ"] = String(d.integer(forKey: refreshKey)) }
         // On unless turned off in Settings (an unset key reads as on).
-        if d.object(forKey: superblocksKey) as? Bool == false { env.removeValue(forKey: "HV_SUPERBLOCKS"); unsetenv("HV_SUPERBLOCKS") }
+        if d.object(forKey: superblocksKey) as? Bool == false { env["HV_SUPERBLOCKS"] = "0" }
         if d.object(forKey: wfiSpinKey) as? Bool == false { env["HV_WFI_SPIN"] = "0" }
         if d.object(forKey: fastFlushKey) as? Bool == false { env["HV_FLUSH"] = "0" }
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -41,6 +42,12 @@ enum EngineTuning {
                     .trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "{Documents}", with: docs.path)
             }
         }
+        applyEnvironment(env)
+    }
+
+    static func applyEnvironment(_ env: [String: String]) {
+        for key in appliedKeys where env[key] == nil { unsetenv(key) }
+        appliedKeys = Set(env.keys)
         for (k, v) in env.sorted(by: { $0.key < $1.key }) {
             setenv(k, v, 1)
             HengeLog.log("tuning", "\(k)=\(v)")

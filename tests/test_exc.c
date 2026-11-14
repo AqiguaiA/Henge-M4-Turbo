@@ -2,10 +2,12 @@
 
 #include <mach/mach_time.h>
 #include <stdlib.h>
+#include "memop.h"
 
 DECLARE_PROGRAM(p_svc);
 DECLARE_PROGRAM(p_brk_undef);
 DECLARE_PROGRAM(p_dabt);
+DECLARE_PROGRAM(p_excl_faults);
 DECLARE_PROGRAM(p_el0);
 DECLARE_PROGRAM(p_sysregs);
 DECLARE_PROGRAM(p_irq);
@@ -43,6 +45,24 @@ static int run(const TestProgram *p, HvCpu *cpu, uint64_t x9) {
     int before = failures;
     if (run_jit(&m, p, &init, cpu, NULL)) failures++;
     return failures != before;
+}
+
+static void test_exclusive_abort(void) {
+    static HvCpu cpu;
+    for (int pair = 0; pair < 2; pair++) {
+        for (int size = pair ? 2 : 0; size < 4; size++) {
+            hv_cpu_reset(&cpu, &m);
+            cpu.x[8] = 0x10000;
+            cpu.x[4] = 0x55;
+            cpu.excl_addr = cpu.x[8];
+            cpu.excl_size = (pair ? 2u : 1u) << size;
+            uint32_t insn = (uint32_t)size << 30 | 0x08040000u | (pair ? 1u << 21 | 10u << 10 : 31u << 10) | 8u << 5 | 9u;
+            check("exclusive", "external store abort", hv_mem_emulate(&cpu, insn, 0x20000), 1);
+            check("exclusive", "fault preserves status", cpu.x[4], 0x55);
+            check("exclusive", "external store ESR", cpu.esr_el1, 0x96000050);
+            check("exclusive", "fault clears monitor", cpu.excl_addr, ~0ull);
+        }
+    }
 }
 
 #define ADDR(sym) ((uint64_t)(uintptr_t)(sym))
@@ -85,6 +105,13 @@ int main(void) {
         check("dabt", "store FAR", c.x[6], 0x10010);
         check("dabt", "no writeback on a fault", c.x[10], 0x10000);
     }
+
+    static const TestProgram excl_faults = TEST_PROGRAM(p_excl_faults);
+    if (!run(&excl_faults, &c, 0)) {
+        check("exclusive", "unaligned load ESR", c.x[1], 0x96000021);
+        check("exclusive", "unaligned load faults", c.x[3], 1);
+    }
+    test_exclusive_abort();
 
     static const TestProgram el0 = TEST_PROGRAM(p_el0);
     uint64_t sp0 = ADDR(stack) + 8192;

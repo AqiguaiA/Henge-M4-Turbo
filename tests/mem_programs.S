@@ -165,6 +165,26 @@ PROGRAM exclusive
     cbnz w13, 4b
 END exclusive
 
+PROGRAM exclusive_pairs
+1:  ldaxp x2, x3, [x0]
+    add x2, x2, #1
+    stlxp w4, x2, x3, [x0]
+    cbnz w4, 1b
+2:  ldxp w8, w9, [x0]
+    add w9, w9, #1
+    stxp w6, w8, w9, [x0]
+    cbnz w6, 2b
+END exclusive_pairs
+
+PROGRAM exclusive_zero
+1:  ldxr xzr, [x0]
+    stxr w4, x2, [x0]
+    cbnz w4, 1b
+2:  ldaxr wzr, [x0]
+    stlxr w7, w3, [x0]
+    cbnz w7, 2b
+END exclusive_zero
+
 PROGRAM atomics
     add x1, x0, #128
     str x2, [x1]

@@ -6,6 +6,8 @@
 name: Build Henge M4-Turbo IPA
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch: {}
 
 env:
@@ -65,6 +67,23 @@ jobs:
       - name: Build restore stack
         working-directory: Henge
         run: zsh tools/build_ios_restore.sh
+
+      - name: Run EngineTuning Swift test & core unit tests
+        working-directory: Henge
+        run: |
+          set -euo pipefail
+          ulimit -s 65520
+          make test-engine-tuning
+          make build/test_classify build/test_jit_region build/test_operands build/test_helper_regs build/test_mmu build/test_jit build/test_mem build/test_exc build/test_shutdown
+          ./build/test_classify
+          ./build/test_jit_region
+          ./build/test_operands
+          ./build/test_helper_regs
+          ./build/test_mmu
+          ./build/test_jit
+          ./build/test_mem
+          ./build/test_exc
+          ./build/test_shutdown
 
       - name: Build M4-Turbo engine (-O3 -mcpu=apple-m4)
         working-directory: Henge

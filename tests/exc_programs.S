@@ -108,6 +108,14 @@ PROGRAM p_dabt
     mov x10, x8
 END p_dabt
 
+PROGRAM p_excl_faults
+    SETUP
+    add x8, sp, #1
+    ldxr x2, [x8]
+    mov x1, x20
+    mov x3, x24
+END p_excl_faults
+
 // Down to EL0 and back up through SVC and an undefined MRS.
 PROGRAM p_el0
     SETUP

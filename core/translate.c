@@ -882,86 +882,24 @@ static void translate_mem(Emit *e, uint32_t insn, uint64_t pc);
 static void put_load_field(Emit *e, int rt, uint32_t off);
 static void put_store_field(Emit *e, int rt, uint32_t off);
 
-/* LDXR/LDAXR and STXR/STLXR (not the pairs), the way QEMU does them: LDXR is
-   an ordinary load that records the address, size and value; STXR, if the
-   address still matches, is a compare-and-swap of that value (CASAL, through
-   the ordinary fast path), and succeeds if memory still held it. Another CPU's
-   store in between makes it fail, and so does an exception (which clears the
-   address), as on hardware; only an ABA change goes unnoticed. */
-static void translate_excl(Emit *e, uint32_t insn, uint64_t pc) {
+/* Exclusives use host scratch x6/x7/x15 throughout. Check the TLB and alignment before changing the
+   monitor or a guest register, so a miss or fault runs the original instruction in do_exclusive. */
+/* shortcut: value-based monitors miss ABA writes, add write generations when exact tracking is required. */
+static int translate_excl(Emit *e, uint32_t insn, uint64_t pc) {
     uint32_t size = insn >> 30;
-    int rn = (insn >> 5) & 0x1f, rt = insn & 0x1f, rs = (insn >> 16) & 0x1f;
-    int load = (insn >> 22) & 1;
-    /* LDXR into XZR: nowhere to stage the value without a spill slot the refill thunk also uses; C does it.
-       STXR: the status register is the CAS's compare value: keep these in C. */
-    if ((load && rt == 31) || (!load && (rs == 31 || rs == rt || rs == rn))) {
-        put_helper(e, pc, insn, HV_OP_MEM);
-        return;
-    }
-    int a = rn;
-    if (rn == 31) {
-        put(e, ADD_SP_TO(15));
-        a = 15;
-    } else if (is_stolen(rn)) {
-        put(e, LDR_X(15, 28, slot_of(rn)));
-        a = 15;
-    }
-    if (load) {
-        put(e, STR_X(a, 28, HV_CPU_EXCL_ADDR));
-        put(e, 0x52800006u | (1u << size) << 5);                /* movz w6, #bytes */
-        put(e, 0xb9000000u | (HV_CPU_EXCL_SIZE / 4) << 10 | 28 << 5 | 6); /* str w6, [x28, #excl_size] */
-        if ((insn >> 15) & 1) /* LDAXR: keep the acquire (other CPUs' stores must be seen in order) */
-            translate_mem(e, size << 30 | 0x08dffc00u | (uint32_t)rn << 5 | (uint32_t)rt, pc); /* ldar{b,h} rt, [rn] */
-        else
-            translate_mem(e, size << 30 | 0x39400000u | (uint32_t)rn << 5 | (uint32_t)rt, pc); /* ldr{b,h} rt, [rn] */
-        put_store_field(e, rt, HV_CPU_EXCL_VAL);
-        return;
-    }
-    put(e, LDR_X(6, 28, HV_CPU_EXCL_ADDR));
-    put(e, 0xca000000u | (uint32_t)a << 16 | 6 << 5 | 6); /* eor x6, x6, xa */
-    uint32_t to_fail = e->n;
-    put(e, CBNZ_X(6));
-    put(e, 0x92800006u);                                   /* movn x6, #0: the monitor clears either way */
-    put(e, STR_X(6, 28, HV_CPU_EXCL_ADDR));
-    put_load_field(e, rs, HV_CPU_EXCL_VAL);                /* rs = the value LDXR saw */
-    translate_mem(e, size << 30 | 0x08e0fc00u | (uint32_t)rs << 16 | (uint32_t)rn << 5 | (uint32_t)rt, pc); /* casal */
-    /* rs now holds what memory held: success if that is what LDXR saw. */
-    if (is_stolen(rs)) put(e, LDR_X(7, 28, slot_of(rs)));
-    else put(e, MOV_X(7, rs));
-    put(e, LDR_X(6, 28, HV_CPU_EXCL_VAL));
-    put(e, 0xca000000u | 7 << 16 | 6 << 5 | 6);            /* eor x6, x6, x7 */
-    uint32_t to_lost = e->n;
-    put(e, CBNZ_X(6));
-    put_const_to(e, rs, 0);
-    uint32_t to_done = e->n;
-    put(e, B_OP);
-    patch_branch(&e->w[to_fail], (int64_t)e->n - to_fail);
-    put(e, 0x92800006u);
-    put(e, STR_X(6, 28, HV_CPU_EXCL_ADDR));
-    patch_branch(&e->w[to_lost], (int64_t)e->n - to_lost);
-    put_const_to(e, rs, 1);
-    patch_branch(&e->w[to_done], (int64_t)e->n - to_done);
-}
-
-/* Inline 64-bit and 128-bit pair exclusives (LDXP/LDAXP, STXP/STLXP). Returns 1 if emitted inline, 0 to
-   leave it to C. Only host x6, x7 and x15 are touched (free scratch: guest x6/x7/x15 live in the HvCpu), so
-   no guest register is borrowed or clobbered. The TLB check is the aligned one (a misaligned pair faults in
-   C), and a miss runs the original instruction in hv_mem_emulate (do_exclusive), which does the whole thing.
-   STXP is a CASPAL (128-bit) or a CASAL of the two words packed (64-bit) against what LDXP saw. */
-static int translate_excl_pair(Emit *e, uint32_t insn, uint64_t pc) {
-    uint32_t size = insn >> 30;
-    if (size < 2 || hv_knob[HV_K_TEST3]) return 0;
+    int pair = (insn >> 21) & 1;
+    if ((pair && size < 2) || hv_knob[HV_K_TEST3]) return 0;
     int rn = (insn >> 5) & 0x1f, rt = insn & 0x1f, rt2 = (insn >> 10) & 0x1f, rs = (insn >> 16) & 0x1f;
     int load = (insn >> 22) & 1;
     int acqrel = (insn >> 15) & 1;
     int el_idx = !(e->flags & HV_BLOCK_EL1) ? 0 : (e->flags & HV_BLOCK_PAN) ? 2 : 1;
-    uint32_t bytes = 2u << size, k = (uint32_t)__builtin_ctz(bytes); /* 8 or 16 bytes */
+    uint32_t bytes = (pair ? 2u : 1u) << size, k = (uint32_t)__builtin_ctz(bytes);
     if (load) {
-        if (rt == rt2 || rt == 31 || rt2 == 31) return 0;
+        if (pair && (rt == rt2 || rt == 31 || rt2 == 31)) return 0;
     } else {
-        if (rs == 31 || rs == rt || rs == rt2 || rs == rn) return 0;
-        if (size == 3 && ((rt & 1) || rt2 != rt + 1 || is_stolen(rt) || is_stolen(rt2))) return 0; /* CASPAL's even pair */
-        if (size == 2 && ((rt != 31 && is_stolen(rt)) || (rt2 != 31 && is_stolen(rt2)))) return 0;
+        if (rs == 31 || rs == rt || (pair && rs == rt2) || rs == rn) return 0;
+        if (pair && size == 3 && ((rt & 1) || rt2 != rt + 1 || is_stolen(rt) || is_stolen(rt2))) return 0;
+        if (pair && size == 2 && ((rt != 31 && is_stolen(rt)) || (rt2 != 31 && is_stolen(rt2)))) return 0;
     }
     int a = rn;
     if (rn == 31) {
@@ -978,7 +916,7 @@ static int translate_excl_pair(Emit *e, uint32_t insn, uint64_t pc) {
     put(e, 0xd1000000u | HV_TLB_ADJ << 10 | 7u << 5 | 7u);                   /* sub x7, x7, #ADJ */
     put(e, 0x92400000u | 50u << 16 | (49u + k) << 10 | 7u << 5 | 7u);       /* and x7, x7, #~(0x3fff & ~(bytes-1)) */
     put(e, CBNZ_X(7));
-    put_ool(e, (Ool){.kind = OOL_SLOW, .pc = pc, .insn = insn});           /* the original LDXP/STXP, in C */
+    put_ool(e, (Ool){.kind = OOL_SLOW, .pc = pc, .insn = insn});
     uint32_t slow = e->nool - 1;
     if (load) {
         put(e, LDR_X(7, 6, tlb + 24));
@@ -986,18 +924,21 @@ static int translate_excl_pair(Emit *e, uint32_t insn, uint64_t pc) {
         put(e, STR_X(a, 28, HV_CPU_EXCL_ADDR));
         put(e, 0x52800006u | bytes << 5);                                   /* movz w6, #bytes */
         put(e, 0xb9000000u | (HV_CPU_EXCL_SIZE / 4) << 10 | 28u << 5 | 6u); /* str w6, [x28, #excl_size] */
-        put(e, (size == 3 ? 0xa9400000u : 0x29400000u) | 15u << 10 | 7u << 5 | 6u); /* ldp x6/w6, x15/w15, [x7] */
-        if (acqrel) put(e, 0xd50339bfu);                                    /* dmb ishld: LDAXP's acquire */
+        if (pair) put(e, (size == 3 ? 0xa9400000u : 0x29400000u) | 15u << 10 | 7u << 5 | 6u);
+        else put(e, size << 30 | 0x39400000u | 7u << 5 | 6u);               /* ldr{b,h} x6/w6, [x7] */
+        if (acqrel) put(e, 0xd50339bfu);                                    /* dmb ishld */
         put(e, STR_X(6, 28, HV_CPU_EXCL_VAL));                              /* (0x400 is past LDP/STP's reach) */
-        put(e, STR_X(15, 28, HV_CPU_EXCL_VAL + 8));
+        put(e, STR_X(pair ? 15 : 31, 28, HV_CPU_EXCL_VAL + 8));
         if (is_stolen(rt)) put(e, STR_X(6, 28, slot_of(rt)));
         else put(e, MOV_X(rt, 6));
-        if (is_stolen(rt2)) put(e, STR_X(15, 28, slot_of(rt2)));
-        else put(e, MOV_X(rt2, 15));
+        if (pair) {
+            if (is_stolen(rt2)) put(e, STR_X(15, 28, slot_of(rt2)));
+            else put(e, MOV_X(rt2, 15));
+        }
         e->ool[slow].join = e->n;
         return 1;
     }
-    /* The monitor: same address, and an LDXP of this size. */
+    /* The monitor must match both the address and the access size. */
     put(e, LDR_X(7, 28, HV_CPU_EXCL_ADDR));
     put(e, 0xca000000u | (uint32_t)a << 16 | 7u << 5 | 7u);                 /* eor x7, x7, xa */
     uint32_t to_fail1 = e->n;
@@ -1009,7 +950,7 @@ static int translate_excl_pair(Emit *e, uint32_t insn, uint64_t pc) {
     put(e, ADD_LSL(15, a, 7, 0));                                           /* x15 = host address */
     put(e, 0x92800006u);                                                    /* movn x6, #0: the monitor clears either way */
     put(e, STR_X(6, 28, HV_CPU_EXCL_ADDR));
-    if (size == 3) {
+    if (pair && size == 3) {
         put(e, LDR_X(6, 28, HV_CPU_EXCL_VAL));
         put(e, LDR_X(7, 28, HV_CPU_EXCL_VAL + 8));
         put(e, 0x4860fc00u | 6u << 16 | 15u << 5 | (uint32_t)rt);           /* caspal x6, x7, xrt, xrt+1, [x15] */
@@ -1018,7 +959,7 @@ static int translate_excl_pair(Emit *e, uint32_t insn, uint64_t pc) {
         put(e, LDR_X(15, 28, HV_CPU_EXCL_VAL + 8));
         put(e, 0xca0f00e7u);                                                /* eor x7, x7, x15 */
         put(e, 0xaa0700c6u);                                                /* orr x6, x6, x7 */
-    } else {
+    } else if (pair) {
         put(e, 0xb9400000u | (HV_CPU_EXCL_VAL / 4) << 10 | 28u << 5 | 6u);  /* ldr w6, [x28, #excl_val] */
         put(e, LDR_X(7, 28, HV_CPU_EXCL_VAL + 8));
         put(e, 0xaa0780c6u);                                                /* orr x6, x6, x7, lsl #32: expected */
@@ -1029,6 +970,13 @@ static int translate_excl_pair(Emit *e, uint32_t insn, uint64_t pc) {
         put(e, 0xb9400000u | (HV_CPU_EXCL_VAL / 4) << 10 | 28u << 5 | 7u);  /* ldr w7, [x28, #excl_val] */
         put(e, LDR_X(15, 28, HV_CPU_EXCL_VAL + 8));
         put(e, 0xaa0f80e7u);                                                /* orr x7, x7, x15, lsl #32 */
+        put(e, 0xca0700c6u);                                                /* eor x6, x6, x7 */
+    } else {
+        put(e, LDR_X(6, 28, HV_CPU_EXCL_VAL));
+        if (is_stolen(rt)) put(e, LDR_X(7, 28, slot_of(rt)));
+        else put(e, MOV_X(7, rt));
+        put(e, size << 30 | 0x08e0fc00u | 6u << 16 | 15u << 5 | 7u);        /* casal{b,h} x6/w6, x7/w7, [x15] */
+        put(e, LDR_X(7, 28, HV_CPU_EXCL_VAL));
         put(e, 0xca0700c6u);                                                /* eor x6, x6, x7 */
     }
     uint32_t to_lost = e->n;
@@ -1055,14 +1003,7 @@ static void translate_mem(Emit *e, uint32_t insn, uint64_t pc) {
     }
     static int c_excl = -1; /* HV_C_EXCL: keep every exclusive on the C path (debugging) */
     if (c_excl < 0) c_excl = getenv("HV_C_EXCL") != NULL;
-    if (op.kind == HV_MEM_EXCL && !e->slow_mem && !c_excl) {
-        if (op.bytes == 1u << op.size) {
-            translate_excl(e, insn, pc);
-            return;
-        }
-        if (op.bytes == 2u << op.size && translate_excl_pair(e, insn, pc))
-            return;
-    }
+    if (op.kind == HV_MEM_EXCL && !e->slow_mem && !c_excl && translate_excl(e, insn, pc)) return;
     /* CASP on the host address, as the guest wrote it, when its two pairs are guest registers that live
        in their own host registers (pairs must be even and consecutive: no stand-ins). macOS 27 runs tens of
        thousands a second, and each took the helper. */

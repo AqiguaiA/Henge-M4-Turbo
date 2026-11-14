@@ -350,16 +350,17 @@ void hv_tlb_flush_user_range(HvCpu *cpu, uint64_t va, uint64_t len) {
 
 /* A big range of kernel VAs. A full flush here also dropped every process's entries and both halves of the branch
    caches, and macOS 27 sends ranges like this hundreds of times a second (a phone running it did 120-260 full flushes a
-   second, Sequoia none). Up to 64 MB page by page, as small ranges are; past that, a scan for kernel entries in the range
+   second, Sequoia none). Up to 4 MB page by page, as small ranges are; past that, a scan for kernel entries in the range
    and the kernel half of the branch caches. */
 void hv_tlb_flush_kernel_range(HvCpu *cpu, uint64_t va, uint64_t len) {
     if (cpu->m && cpu->m->stats_interval) cpu->m->stats.kernel_ranges++;
     uint64_t first = va & ~(uint64_t)PAGE_MASK;
+    uint64_t span = va - first + len;
     if (len <= (256ull << HV_TLB_PAGE_BITS)) {
-        for (uint64_t p = first; p < va + len; p += 1ull << HV_TLB_PAGE_BITS) hv_tlb_flush_va_asid(cpu, p, -1);
+        for (uint64_t off = 0; off < span; off += 1ull << HV_TLB_PAGE_BITS) hv_tlb_flush_va_asid(cpu, first + off, -1);
         return;
     }
-    uint64_t lo = first & 0x00ffffffffffffffull, hi = (va + len) & 0x00ffffffffffffffull; /* tagged addresses: by the low 56 bits */
+    uint64_t lo = first & 0x00ffffffffffffffull, hi = lo + span; /* keep the exclusive endpoint at 2^56 */
     if (cpu->nkernel_fills <= HV_KERNEL_FILLS) {
         /* kernel_fills[] holds hv_tlb_code() values, i.e. indexes into cpu->tlb (as user_fills[] does). */
         for (uint32_t k = 0; k < cpu->nkernel_fills; k++) {

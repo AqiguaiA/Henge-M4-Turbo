@@ -205,7 +205,7 @@ int main(void) {
     }
 
     /* A big kernel-range TLBI drops the kernel pages in the range and keeps the rest, the processes' entries included
-       (it used to flush everything). 512 pages goes page by page, 6144 pages by a scan. */
+       (it used to flush everything). Both ranges use the kernel fill log. */
     {
         static const struct { uint32_t scale, num, pages; } ranges[2] = {{1, 7, 512}, {2, 2, 6144}};
         const uint64_t base = 0xfffffe0040000000ull;
@@ -217,6 +217,7 @@ int main(void) {
                 HvTlbEntry *t = hv_tlb_ent(&cpu, (va >> 14) & (HV_TLB_SIZE - 1), 1);
                 t->read_tag = va - HV_TLB_ADJ;
                 t->addend = 0;
+                cpu.kernel_fills[cpu.nkernel_fills++] = (uint16_t)hv_tlb_code((va >> 14) & (HV_TLB_SIZE - 1), 1);
             }
             uint64_t uva = 0x100000000ull + ((uint64_t)7000 << 14); /* a process's page, in a slot outside the range's */
             HvTlbEntry *u = hv_tlb_ent(&cpu, (uva >> 14) & (HV_TLB_SIZE - 1), 0);
@@ -240,6 +241,44 @@ int main(void) {
                 failures++;
             }
         }
+    }
+
+    /* Ranges ending at the top of the kernel address space, in both TLB layouts and scan modes. */
+    {
+        int old_layout = hv_tlb_tmajor;
+        for (int layout = 0; layout < 2; layout++) {
+            hv_tlb_flush(&cpu);
+            hv_tlb_tmajor = layout;
+            for (int large = 0; large < 2; large++) {
+                for (int overflow = 0; overflow < 2; overflow++) {
+                    hv_tlb_flush(&cpu);
+                    uint64_t pages = large ? 512 : 2, len = pages << HV_TLB_PAGE_BITS;
+                    uint64_t base = 0ull - len;
+                    const uint64_t vas[] = {base, 0ull - (1ull << HV_TLB_PAGE_BITS), base - (1ull << HV_TLB_PAGE_BITS)};
+                    for (int k = 0; k < 3; k++) {
+                        uint32_t slot = (vas[k] >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1);
+                        HvTlbEntry *e = hv_tlb_ent(&cpu, slot, 1);
+                        e->read_tag = vas[k] - HV_TLB_ADJ;
+                        e->addend = 0;
+                        cpu.kernel_fills[cpu.nkernel_fills++] = (uint16_t)hv_tlb_code(slot, 1);
+                    }
+                    if (overflow) cpu.nkernel_fills = HV_KERNEL_FILLS + 1;
+                    cpu.el = 1;
+                    cpu.x[1] = 2ull << 46 | (large ? 1ull << 44 | 7ull << 39 : 0) | ((base >> 14) & 0x1fffffffffull);
+                    hv_sysreg_sys(&cpu, 0xd5088221u, 0);
+                    for (int k = 0; k < 3; k++) {
+                        int dropped = hv_tlb_ent(&cpu, (vas[k] >> HV_TLB_PAGE_BITS) & (HV_TLB_SIZE - 1), 1)->read_tag == HV_TLB_INVALID;
+                        checks++;
+                        if (dropped != (k < 2)) {
+                            printf("  FAIL top kernel range: layout %d, large %d, overflow %d, page %d\n", layout, large, overflow, k);
+                            failures++;
+                        }
+                    }
+                }
+            }
+        }
+        hv_tlb_flush(&cpu);
+        hv_tlb_tmajor = old_layout;
     }
 
     /* A TLBI by VA and ASID forgets the indirect-branch cache entries of that page
