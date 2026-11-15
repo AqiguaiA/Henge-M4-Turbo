@@ -25,7 +25,13 @@
 
 ## M4-Turbo Optimizations & Fixes (Apple M4 iPad Pro / iPadOS 27.2)
 
-本仓库基于 [Leviidev/Henge](https://github.com/Leviidev/Henge) 构建，面向 **非越狱 Apple M4 iPad Pro（iPadOS 27.2）** 进行针对性引擎性能优化、稳定性格外审计修复与免费签名打包适配：
+> **GPL-2.0-or-later 开源合规与修改声明 (Modification & License Notice)**
+>
+> - 本仓库（`AqiguaiA/Henge-M4-Turbo`）为基于上游 [Leviidev/Henge](https://github.com/Leviidev/Henge)（Copyright © Leviidev and contributors）的**非官方衍生修改版**，并非原作者原始发布版本。
+> - 依据 **GNU General Public License v2.0 (GPLv2) 第 2(a) 条**：本衍生分支在 **`2026-11-14` 至 `2026-11-15`** 期间对核心转译与运行期模块进行了修改与增补，涵盖目录与文件：`core/`、`host/`、`devices/`、`ios/`、`tests/`、`Makefile`、[`.github/workflows/build-ipa.yml`](.github/workflows/build-ipa.yml) 与 `README.md`。
+> - 依据 **GPLv2 第 2(b) 条与第 11–12 条**：本衍生作品整体及全部修改内容继续以 **`GPL-2.0-or-later`** 协议免费向所有第三方开源发布（详见 [LICENSE](LICENSE) 与 [docs/licensing.md](docs/licensing.md)），并**按“现状”分发、不提供任何明示或默示担保（AS IS, WITHOUT ANY WARRANTY）**。
+
+本仓库基于 [Leviidev/Henge](https://github.com/Leviidev/Henge) 构建，面向 **非越狱 Apple M4 iPad Pro（iPadOS 27.2）** 进行针对性引擎性能优化、稳定性格外审计修复、免费签名打包适配与妙控板手势增强：
 
 ### 1. M4-Turbo 引擎与图形栈核心优化（Fork Enhancements）
 1. **Apple M4 全栈优化编译与性能核调度**：iOS 引擎静态库采用 `-O3 -mcpu=apple-m4` 编译（[`.github/workflows/build-ipa.yml`](.github/workflows/build-ipa.yml)），`host/vm.c` 与 `devices/pvg_metal.m` 将 guest vCPU 及 Metal 回放队列调度至 `QOS_CLASS_USER_INTERACTIVE`，优先锁定 M4 P-Core。
@@ -53,6 +59,10 @@
    - 将 `ttbr0_el1`、`ttbr1_el1`、`vbar_el1`、`mair_el1`、`contextidr_el1`、`cpacr_el1`、`mdscr_el1`、`cntkctl_el1`、`mpidr` 9 个高频 EL1 字段紧密排布进 `helper_came_from`（`0x510`）与 `tlb`（`0x580`）之间原有的 104 字节对齐空隙中，保持 `HV_CPU_TLB`（`0x580`）与 `HV_CPU_RET_TAB`（`0x201000`）偏移完全不变并附带 `_Static_assert` 校验；
    - 在 `translate_sysreg_inline()` 中新增内联 `DCZID_EL0`，扩展 EL1 读写表 `el1_rw[]`（新增 `CONTEXTIDR_EL1`、`MDSCR_EL1` 并升级 `ESR_EL1`/`FAR_EL1`/`PAR_EL1` 写操作为直接内存存储），新增 EL1 只读表 `el1_ro[]`（内联 `TTBR0_EL1`、`TTBR1_EL1`、`VBAR_EL1`、`MAIR_EL1`、`CPACR_EL1`、`CNTKCTL_EL1`、`MPIDR_EL1` 读取），以及 EL1 常量表 `el1_const[]`（`CNTFRQ_EL0`、`CTR_EL0`、`MIDR_EL1`、`CLIDR_EL1` 与 `ID_AA64{PFR0,DFR0,ISAR0,ISAR1,MMFR0,MMFR1}_EL1`），共在 4 张分组内涵盖 28 个热系统寄存器访问，跳过 `_hv_helper_entry` 陷阱切换；
    - `translate_one()` 对 EL1 下的 `IC IALLU` / `IC IALLUIS` 在未显式设置 `HV_IC_FLUSH` 时直接按零陷出空操作处理，不触发 helper 调用或截断超块。
+4. **Apple Magic Keyboard / 外接妙控板快捷手势与触控快捷菜单**（[`ios/Henge/Hardware.swift`](ios/Henge/Hardware.swift)、[`ios/Henge/Trackpad.swift`](ios/Henge/Trackpad.swift)、[`ios/Henge/SessionView.swift`](ios/Henge/SessionView.swift)）：
+   - **键盘修饰键 + 妙控板手势合成（3 指/2 指）**：因 iPadOS 会截获物理妙控板原生 3/4 指系统手势，现支持在使用物理妙控板时按住 **`⌃ Control` + 双指滑动** 自动合成 USB Magic Trackpad 2 原生 **3 指滑动**（上滑打开 **调度中心 Mission Control**、下滑 **应用程序窗口 App Exposé**、左右滑动切换 **空间 Spaces**）；按住 **`⌥ Option` + 双指滑动** 合成 **2 指连续触控板滑动**（Safari/Finder 前进后退与平滑平移）；
+   - **双指捏合 / 旋转与快捷切换**：物理妙控板上的直接**双指捏合缩放**与**双指旋转**会合成至虚拟 USB Magic Trackpad 2；按住 **`⌃ Control` 或 `⌥ Option` 双指捏合/张开** 可触发 **启动台（Launchpad）** 与 **显示桌面（Show Desktop）**；
+   - **会话工具栏手势菜单**：在 [`SessionView.swift`](ios/Henge/SessionView.swift) 竖屏与横屏/全屏工具栏新增手势菜单按钮（`rectangle.3.group`），可一键触发调度中心、App Exposé、左/右切换空间、显示桌面、启动台及 Spotlight（`⌘Space`）。
 
 ### 4. GitHub Actions 自动构建与下载
 每次推送至 `main` 分支或手动触发 [`.github/workflows/build-ipa.yml`](.github/workflows/build-ipa.yml) 时，将在 `xcode-27` macOS Runner 上自动执行以下流程：

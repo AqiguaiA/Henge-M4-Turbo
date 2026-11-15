@@ -294,13 +294,15 @@ struct SessionView: View {
                 Spacer()
                 pasteTool
                 Spacer()
+                gestureMenu(tint: Desk.text)
+                Spacer()
                 tool("plus.magnifyingglass", "Zoom in") { zoomed = true }
                 Spacer()
                 tool("info.circle", "Details") { showDetails = true }
                 Spacer()
                 tool("power", "Shut down", tint: Desk.bad) { stopTapped() }
             }
-            .padding(.horizontal, 22)
+            .padding(.horizontal, 14)
             .frame(width: layout.pad.width, height: 54)
             .background(Desk.card, in: Capsule())
             .overlay(Capsule().stroke(Desk.hairline, lineWidth: 0.5))
@@ -367,6 +369,26 @@ struct SessionView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { showRevealHint = false }
     }
 
+    private func gestureMenu(tint: Color) -> some View {
+        Menu {
+            Button("Mission Control (⌃ + 2-Finger Up)") { TrackpadGestures.missionControl() }
+            Button("App Exposé (⌃ + 2-Finger Down)") { TrackpadGestures.appExpose() }
+            Button("Previous Space (⌃ + 2-Finger Right)") { TrackpadGestures.spaceLeft() }
+            Button("Next Space (⌃ + 2-Finger Left)") { TrackpadGestures.spaceRight() }
+            Divider()
+            Button("Show Desktop (⌃ + Pinch Out)") { TrackpadGestures.showDesktop() }
+            Button("Launchpad (⌃ + Pinch In)") { TrackpadGestures.launchpad() }
+            Button("Spotlight (⌘Space)") { TrackpadGestures.spotlight() }
+        } label: {
+            Image(systemName: "rectangle.3.group")
+                .font(.system(size: 19, weight: .medium))
+                .foregroundStyle(tint)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel("Trackpad gestures")
+    }
+
     private func tool(_ symbol: String, _ label: String, tint: Color = Desk.text, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
@@ -387,6 +409,7 @@ struct SessionView: View {
             tool("eye.slash", "Hide controls", tint: .white) { hideControls() }
             tool("keyboard", "Keyboard", tint: .white) { typing.toggle() }
             pasteTool
+            gestureMenu(tint: .white)
             tool(zoomed ? "minus.magnifyingglass" : "plus.magnifyingglass", zoomed ? "Zoom out" : "Zoom in", tint: zoomed ? Desk.accentLight : .white) { zoomed.toggle() }
             tool("info.circle", "Details", tint: .white) { showDetails = true }
             Rectangle().fill(Color.white.opacity(0.3)).frame(width: 1, height: 22).padding(.horizontal, 4)
@@ -507,7 +530,7 @@ struct SessionView: View {
                     Toggle("Sharp edges", isOn: $sharpCursor)
                     LabeledContent("Scroll speed", value: String(format: "%.1f×", scrollSpeed))
                     Slider(value: $scrollSpeed, in: 0.1...1.5)
-                    Text("The Mac supplies a small pointer image. Enlarging it can look blurry; 1× is the sharpest on an iPad. Scroll speed changes apply immediately.")
+                    Text("The Mac supplies a small pointer image. Enlarging it can look blurry; 1× is the sharpest on an iPad. Scroll speed changes apply immediately. On a Magic Keyboard trackpad, hold ⌃ while scrolling with two fingers for Mission Control, App Exposé, or switching Spaces, hold ⌥ for two-finger swipe navigation, hold ⌃/⌥ while pinching for Launchpad or Show Desktop, or use two-finger pinch and rotate directly.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("Sharing") {

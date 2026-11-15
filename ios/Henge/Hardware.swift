@@ -70,6 +70,17 @@ enum HardwareKeys {
     private static var held: Set<UInt8> = []
     private static var lastKey: CFTimeInterval = 0
 
+    static var isControlHeld: Bool { held.contains(0xe0) || held.contains(0xe4) }
+    static var isOptionHeld: Bool { held.contains(0xe2) || held.contains(0xe6) }
+
+    /// Temporarily releases held Control/Option keys in the guest while a synthesized multi-finger
+    /// trackpad gesture runs, so macOS sees an unmodified 3-finger or 4-finger Magic Trackpad 2 gesture.
+    static func suppressGestureModifiers() {
+        for u: UInt8 in [0xe0, 0xe4, 0xe2, 0xe6] where held.contains(u) {
+            henge_vm_key_hid(u, 0)
+        }
+    }
+
     /// With the on-screen keyboard's view holding the keyboard, iOS may also offer a hardware key as
     /// text, and again as it repeats. The Mac has the key already, and repeats it itself.
     static var keyJustPressed: Bool {
@@ -163,6 +174,10 @@ final class HardwareMouse {
     private var reverse = false
     private var scrollsLogged = 0 // the first few, to see what a device's raw values look like
     private var lastScrollFirst: Float = 0, lastScrollSecond: Float = 0
+    private var synthFingers: Int = 0
+    private var synthX: Float = 4067
+    private var synthY: Float = 2603
+    private var synthEndTimer: Timer?
 
     func start() {
         let defaults = UserDefaults.standard
@@ -194,6 +209,7 @@ final class HardwareMouse {
     }
 
     func stop() {
+        endSynthSwipe()
         PointerLock.set(false)
         releaseButtons()
         observers.forEach(NotificationCenter.default.removeObserver)
@@ -210,6 +226,7 @@ final class HardwareMouse {
     }
 
     func releaseButtons() {
+        endSynthSwipe()
         for button in buttons.releaseAll() { henge_vm_mouse_button(button, 0) }
     }
 
@@ -256,6 +273,17 @@ final class HardwareMouse {
         let horizontalChanged = second != lastScrollSecond
         lastScrollFirst = first
         lastScrollSecond = second
+        let wantFingers = HardwareKeys.isControlHeld ? 3 : (HardwareKeys.isOptionHeld ? 2 : 0)
+        if wantFingers > 0 {
+            let dy = verticalChanged ? -first : 0
+            let dx = horizontalChanged ? second : 0
+            if dx != 0 || dy != 0 {
+                updateSynthSwipe(dx: dx, dy: dy, fingers: wantFingers)
+            }
+            return
+        } else if synthFingers > 0 {
+            endSynthSwipe()
+        }
         let mostlyVertical = abs(first) > 2 * abs(second)
         let mostlyHorizontal = abs(second) > 2 * abs(first)
         let verticalRaw = verticalChanged && !mostlyHorizontal ? -first : 0
@@ -278,5 +306,51 @@ final class HardwareMouse {
         guard value.isFinite else { return 0 }
         let units = Int32(min(32, (22 * scale * abs(value).squareRoot()).rounded()))
         return value < 0 ? -units : units
+    }
+
+    private static func nowMs() -> UInt32 {
+        let ms = UInt32(truncatingIfNeeded: Int(ProcessInfo.processInfo.systemUptime * 1000))
+        return ms == 0 ? 1 : ms
+    }
+
+    private func updateSynthSwipe(dx: Float, dy: Float, fingers count: Int) {
+        if synthFingers != count {
+            endSynthSwipe()
+            HardwareKeys.suppressGestureModifiers()
+            synthX = 4067
+            synthY = 2603
+            synthFingers = count
+            let ts = Self.nowMs()
+            let offsets: [Float] = count == 3 ? [-700, 0, 700] : [-450, 450]
+            for (idx, off) in offsets.enumerated() {
+                henge_vm_touch(Int32(11 + idx), 0, Int32(synthX + off), Int32(synthY), ts)
+            }
+        }
+        synthX = min(max(synthX + dx * 260, 1200), 6934)
+        synthY = min(max(synthY + dy * 260, 600), 4606)
+        let ts = Self.nowMs()
+        let offsets: [Float] = count == 3 ? [-700, 0, 700] : [-450, 450]
+        for (idx, off) in offsets.enumerated() {
+            henge_vm_touch(Int32(11 + idx), 1, Int32(synthX + off), Int32(synthY), ts)
+        }
+        henge_vm_touch_frame(ts)
+        synthEndTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.16, repeats: false) { [weak self] _ in
+            self?.endSynthSwipe()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        synthEndTimer = timer
+    }
+
+    private func endSynthSwipe() {
+        synthEndTimer?.invalidate()
+        synthEndTimer = nil
+        guard synthFingers > 0 else { return }
+        let count = synthFingers
+        synthFingers = 0
+        let ts = Self.nowMs()
+        for idx in 0..<count {
+            henge_vm_touch(Int32(11 + idx), 2, 0, 0, ts)
+        }
     }
 }
