@@ -26,7 +26,7 @@ struct SessionView: View {
     @AppStorage("henge.display.brightness") private var screenBrightness = 1.0
     @AppStorage("henge.cursor.scale") private var cursorScale = Device.isPad ? 1 : 3
     @AppStorage("henge.cursor.sharp") private var sharpCursor = true
-    @AppStorage(HardwareMouse.scrollSpeedKey) private var scrollSpeed = 0.3
+    @AppStorage(HardwareMouse.scrollSpeedKey) private var scrollSpeed = 0.25
 
     @State private var typing = false
     @State private var zoomed = false
@@ -528,8 +528,8 @@ struct SessionView: View {
                     }
                     .pickerStyle(.segmented)
                     Toggle("Sharp edges", isOn: $sharpCursor)
-                    LabeledContent("Scroll speed", value: String(format: "%.1f×", scrollSpeed))
-                    Slider(value: $scrollSpeed, in: 0.1...1.5)
+                    LabeledContent("Scroll speed", value: String(format: scrollSpeed < 0.1 ? "%.2f×" : "%.1f×", scrollSpeed))
+                    Slider(value: $scrollSpeed, in: 0.05...1.5)
                     Text("The Mac supplies a small pointer image. Enlarging it can look blurry; 1× is the sharpest on an iPad. Scroll speed changes apply immediately. On a Magic Keyboard trackpad, hold ⌃ while scrolling with two fingers for Mission Control, App Exposé, or switching Spaces, hold ⌥ for two-finger swipe navigation, hold ⌃/⌥ while pinching for Launchpad or Show Desktop, or use two-finger pinch and rotate directly.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }

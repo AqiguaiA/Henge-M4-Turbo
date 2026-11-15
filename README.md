@@ -62,7 +62,7 @@
 4. **Apple Magic Keyboard / 外接妙控板快捷手势与触控快捷菜单**（[`ios/Henge/Hardware.swift`](ios/Henge/Hardware.swift)、[`ios/Henge/Trackpad.swift`](ios/Henge/Trackpad.swift)、[`ios/Henge/SessionView.swift`](ios/Henge/SessionView.swift)）：
    - **键盘修饰键 + 妙控板手势合成（3 指/2 指）**：因 iPadOS 会截获物理妙控板原生 3/4 指系统手势，现支持在使用物理妙控板时按住 **`⌃ Control` + 双指滑动** 自动合成 USB Magic Trackpad 2 原生 **3 指滑动**（上滑打开 **调度中心 Mission Control**、下滑 **应用程序窗口 App Exposé**、左右滑动切换 **空间 Spaces**）；按住 **`⌥ Option` + 双指滑动** 合成 **2 指连续触控板滑动**（Safari/Finder 前进后退与平滑平移）；
    - **双指捏合 / 旋转与快捷切换**：物理妙控板上的直接**双指捏合缩放**与**双指旋转**会合成至虚拟 USB Magic Trackpad 2；按住 **`⌃ Control` 或 `⌥ Option` 双指捏合/张开** 可触发 **启动台（Launchpad）** 与 **显示桌面（Show Desktop）**；
-   - **会话工具栏手势菜单**：在 [`SessionView.swift`](ios/Henge/SessionView.swift) 竖屏与横屏/全屏工具栏新增手势菜单按钮（`rectangle.3.group`），可一键触发调度中心、App Exposé、左/右切换空间、显示桌面、启动台及 Spotlight（`⌘Space`）。
+   - **会话工具栏手势菜单与平滑滚动控制**：在 [`SessionView.swift`](ios/Henge/SessionView.swift) 竖屏与横屏/全屏工具栏新增手势菜单按钮（`rectangle.3.group`），可一键触发调度中心、App Exposé、左/右切换空间、显示桌面、启动台及 Spotlight（`⌘Space`）；物理妙控板/鼠标滚轮移除 `sqrt` 小值放大，改为亚刻度浮点余数累积、`30 ms` 节流包发送并支持最低 `0.05×` 滚动速度，避免触发 macOS 高速飞轮倍增。
 
 ### 4. GitHub Actions 自动构建与下载
 每次推送至 `main` 分支或手动触发 [`.github/workflows/build-ipa.yml`](.github/workflows/build-ipa.yml) 时，将在 `xcode-27` macOS Runner 上自动执行以下流程：

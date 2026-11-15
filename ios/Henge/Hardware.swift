@@ -170,6 +170,8 @@ final class HardwareMouse {
     private var buttons = PhysicalMouseButtons(swapsRightAndMiddle: false)
     private var buttonsLogged = 0
     private var restX: Float = 0, restY: Float = 0
+    private var restScrollX: Float = 0, restScrollY: Float = 0
+    private var lastWheelTime: CFTimeInterval = 0
     private var speed: Float = 1
     private var reverse = false
     private var scrollsLogged = 0 // the first few, to see what a device's raw values look like
@@ -190,6 +192,7 @@ final class HardwareMouse {
         HengeLog.log("input", "physical mouse: swap right/middle \(swapButtons ? "on" : "off")")
         lastScrollFirst = 0
         lastScrollSecond = 0
+        resetScrollAccumulator()
         GCMouse.mice().forEach(attach)
         observers.append(NotificationCenter.default.addObserver(forName: .GCMouseDidConnect, object: nil, queue: .main) { [weak self] note in
             if let mouse = note.object as? GCMouse { self?.attach(mouse) }
@@ -210,6 +213,7 @@ final class HardwareMouse {
 
     func stop() {
         endSynthSwipe()
+        resetScrollAccumulator()
         PointerLock.set(false)
         releaseButtons()
         observers.forEach(NotificationCenter.default.removeObserver)
@@ -227,7 +231,14 @@ final class HardwareMouse {
 
     func releaseButtons() {
         endSynthSwipe()
+        resetScrollAccumulator()
         for button in buttons.releaseAll() { henge_vm_mouse_button(button, 0) }
+    }
+
+    private func resetScrollAccumulator() {
+        restScrollX = 0
+        restScrollY = 0
+        lastWheelTime = 0
     }
 
     private func attach(_ mouse: GCMouse) {
@@ -275,8 +286,10 @@ final class HardwareMouse {
         lastScrollSecond = second
         let wantFingers = HardwareKeys.isControlHeld ? 3 : (HardwareKeys.isOptionHeld ? 2 : 0)
         if wantFingers > 0 {
-            let dy = verticalChanged ? -first : 0
-            let dx = horizontalChanged ? second : 0
+            restScrollX = 0
+            restScrollY = 0
+            let dy = verticalChanged && first.isFinite ? -first : 0
+            let dx = horizontalChanged && second.isFinite ? second : 0
             if dx != 0 || dy != 0 {
                 updateSynthSwipe(dx: dx, dy: dy, fingers: wantFingers)
             }
@@ -286,26 +299,33 @@ final class HardwareMouse {
         }
         let mostlyVertical = abs(first) > 2 * abs(second)
         let mostlyHorizontal = abs(second) > 2 * abs(first)
-        let verticalRaw = verticalChanged && !mostlyHorizontal ? -first : 0
-        let horizontalRaw = horizontalChanged && !mostlyVertical ? second : 0
+        let verticalRaw = verticalChanged && !mostlyHorizontal && first.isFinite ? -first : 0
+        let horizontalRaw = horizontalChanged && !mostlyVertical && second.isFinite ? second : 0
         let defaults = UserDefaults.standard
         let configured = defaults.object(forKey: Self.scrollSpeedKey) == nil
-            ? 0.3 : defaults.double(forKey: Self.scrollSpeedKey)
-        let scale = Float(configured.isFinite ? min(max(configured, 0.1), 1.5) : 0.3)
-        let way: Int32 = reverse ? -1 : 1
-        let horizontal = way * Self.wheelUnits(horizontalRaw, scale: scale)
-        let vertical = way * Self.wheelUnits(verticalRaw, scale: scale)
-        if scrollsLogged < 24 {
-            scrollsLogged += 1
-            HengeLog.log("input", "scroll raw: \(first), \(second); units: \(horizontal), \(vertical)")
+            ? 0.25 : defaults.double(forKey: Self.scrollSpeedKey)
+        let scale = Float(configured.isFinite ? min(max(configured, 0.05), 1.5) : 0.25)
+        let way: Float = reverse ? -1 : 1
+        if verticalRaw * restScrollY < 0 { restScrollY = 0 }
+        if horizontalRaw * restScrollX < 0 { restScrollX = 0 }
+        let stepScale = scale * 1.2
+        restScrollX = min(max(restScrollX + way * horizontalRaw * stepScale, -2.5), 2.5)
+        restScrollY = min(max(restScrollY + way * verticalRaw * stepScale, -2.5), 2.5)
+        let now = CACurrentMediaTime()
+        guard now - lastWheelTime >= 0.030 else { return }
+        let maxStep: Int32 = scale <= 0.4 ? 1 : 2
+        let horizontal = min(max(Int32(restScrollX), -maxStep), maxStep)
+        let vertical = min(max(Int32(restScrollY), -maxStep), maxStep)
+        if horizontal != 0 || vertical != 0 {
+            restScrollX -= Float(horizontal)
+            restScrollY -= Float(vertical)
+            lastWheelTime = now
+            if scrollsLogged < 24 {
+                scrollsLogged += 1
+                HengeLog.log("input", "scroll raw: \(first), \(second); units: \(horizontal), \(vertical)")
+            }
+            henge_vm_mouse_scroll(horizontal, vertical)
         }
-        if horizontal != 0 || vertical != 0 { henge_vm_mouse_scroll(horizontal, vertical) }
-    }
-
-    private static func wheelUnits(_ value: Float, scale: Float) -> Int32 {
-        guard value.isFinite else { return 0 }
-        let units = Int32(min(32, (22 * scale * abs(value).squareRoot()).rounded()))
-        return value < 0 ? -units : units
     }
 
     private static func nowMs() -> UInt32 {
@@ -326,8 +346,9 @@ final class HardwareMouse {
                 henge_vm_touch(Int32(11 + idx), 0, Int32(synthX + off), Int32(synthY), ts)
             }
         }
-        synthX = min(max(synthX + dx * 260, 1200), 6934)
-        synthY = min(max(synthY + dy * 260, 600), 4606)
+        let step: Float = count == 3 ? 260 : 95
+        synthX = min(max(synthX + dx * step, 1200), 6934)
+        synthY = min(max(synthY + dy * step, 600), 4606)
         let ts = Self.nowMs()
         let offsets: [Float] = count == 3 ? [-700, 0, 700] : [-450, 450]
         for (idx, off) in offsets.enumerated() {

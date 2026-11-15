@@ -5,7 +5,7 @@ struct SettingsView: View {
     @AppStorage(JITCoordinator.autoEnableKey) private var jitAtLaunch = true
     @AppStorage(HardwareMouse.speedKey) private var mouseSpeed = 1.0
     @AppStorage(HardwareMouse.reverseKey) private var reverseScrolling = false
-    @AppStorage(HardwareMouse.scrollSpeedKey) private var scrollSpeed = 0.3
+    @AppStorage(HardwareMouse.scrollSpeedKey) private var scrollSpeed = 0.25
     @AppStorage(VolumeClicks.inputModeKey) private var inputMode = VolumeClicks.InputMode.touchscreen
     @AppStorage(VolumeClicks.modeKey) private var volumeMode = VolumeClicks.Mode.delayHold
     @AppStorage(VolumeClicks.swapKey) private var swapButtons = false
@@ -72,7 +72,7 @@ struct SettingsView: View {
                         Toggle("Reverse scrolling", isOn: $reverseScrolling)
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Scroll speed")
-                            Slider(value: $scrollSpeed, in: 0.1...1.5)
+                            Slider(value: $scrollSpeed, in: 0.05...1.5)
                         }
                         Toggle("Swap physical right and middle buttons", isOn: $swapMouseButtons)
                         Text("Only enable this if your physical mouse's right and middle buttons are reversed in the Mac. Touch controls stay unchanged. Restart the Mac session to apply.")
