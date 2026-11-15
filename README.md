@@ -44,7 +44,17 @@
 - **`EngineTuning` 环境变量生命周期修正**：[`ios/Henge/EngineTuning.swift`](ios/Henge/EngineTuning.swift) 关闭开关时显式写入 `HV_SUPERBLOCKS=0`（避免被默认启用覆盖），并追踪 `appliedKeys` 以便在重新应用 `Documents/henge-env.txt` 时自动 `unsetenv` 已删除的键值（已新增 `test_engine_tuning` 验证）。
 - **iPadOS 27.2 (TXM) 免费个人签名与 JIT 引导适配**：CI 默认使用 [`ios/Henge/Henge.personal.entitlements`](ios/Henge/Henge.personal.entitlements)（仅保留 `get-task-allow` 与 `com.apple.developer.kernel.increased-memory-limit`），避免免费 Apple ID 安装出现 `-80045` 并满足 iPadOS 27.2 TXM 校验，配合 StikDebug / StikJIT 引导启用设备端 JIT。
 
-### 3. GitHub Actions 自动构建与下载
+### 3. Round 3 优化（6 GB+ 客户机内存解锁与系统寄存器 / `IC IALLU` 零陷出内联）
+1. **释放 60 GB 高位虚拟地址保留，解锁 6 GB–8 GB 客户机内存**（[`ios/Henge/Native/henge-ios-jit.c`](ios/Henge/Native/henge-ios-jit.c)、[`ios/Henge/Native/henge-ios-jit.h`](ios/Henge/Native/henge-ios-jit.h)、[`ios/Henge/Native/henge-vm.c`](ios/Henge/Native/henge-vm.c)）：
+   - 原 `henge_ios_jit_prewarm()` 会通过 `henge_ios_hold_high()` 预留 `60 GB`（`40 GB + 16 GB + 4 GB`）高端 VA 给实验性 Mac App 运行时，而启动 `hengevm` 虚拟机时未调用 `henge_ios_release_high_hold()` 归还，导致 `henge_largest_mapping_mb()` 仅探测到约 `2.5 GB` 连续虚拟地址空间并将用户设置的 6 GB RAM 静默压缩至 `2048 MB`。
+   - 现于 `henge_largest_mapping_mb()` 探测前及 `henge_ios_jit_get_mapping()` 中显式调用 `henge_ios_release_high_hold()` 归还这 60 GB 高位保留（非 iOS 测试桩同步补齐空实现），开启 `extended-virtual-addressing` 时可完整解锁 6 GB–8 GB 内存分配；[`ios/Henge/Machines.swift`](ios/Henge/Machines.swift) 的 `GuestMemory.prepare()` 同步将低 VA 场景预留裕量由固定 `512 MB` 优化为动态 `256 MB` / `512 MB`（按 `256 MB` 对齐），并在 [`ios/Henge/SessionView.swift`](ios/Henge/SessionView.swift) 详情页新增实时 `Memory`（`bootRAM`）显示与低连续虚拟地址空间专属报错提示、前置 `henge_vm_can_start()` 检查。
+2. **自适应 Code Cache 默认大小**（[`ios/Henge/JIT/JITBootstrap.swift`](ios/Henge/JIT/JITBootstrap.swift)）：`defaultCodeCacheMB` 在检测到缺少 `extended-virtual-addressing`（`henge_largest_reservation_gb() < 16`，例如免费个人证书侧载）时自动收敛为 **`512 MB`**（显著减少 JIT 双映射 Rx/Rw 区域及翻译块记录占用的低端虚拟地址空间），保留 `extended-virtual-addressing` 设备上的 `1536 MB` 默认上限。
+3. **热路径系统寄存器与 EL1 `IC IALLU` / `IC IALLUIS` 零陷出内联**（[`core/cpu.h`](core/cpu.h)、[`core/translate.c`](core/translate.c)）：
+   - 将 `ttbr0_el1`、`ttbr1_el1`、`vbar_el1`、`mair_el1`、`contextidr_el1`、`cpacr_el1`、`mdscr_el1`、`cntkctl_el1`、`mpidr` 9 个高频 EL1 字段紧密排布进 `helper_came_from`（`0x510`）与 `tlb`（`0x580`）之间原有的 104 字节对齐空隙中，保持 `HV_CPU_TLB`（`0x580`）与 `HV_CPU_RET_TAB`（`0x201000`）偏移完全不变并附带 `_Static_assert` 校验；
+   - 在 `translate_sysreg_inline()` 中新增内联 `DCZID_EL0`，扩展 EL1 读写表 `el1_rw[]`（新增 `CONTEXTIDR_EL1`、`MDSCR_EL1` 并升级 `ESR_EL1`/`FAR_EL1`/`PAR_EL1` 写操作为直接内存存储），新增 EL1 只读表 `el1_ro[]`（内联 `TTBR0_EL1`、`TTBR1_EL1`、`VBAR_EL1`、`MAIR_EL1`、`CPACR_EL1`、`CNTKCTL_EL1`、`MPIDR_EL1` 读取），以及 EL1 常量表 `el1_const[]`（`CNTFRQ_EL0`、`CTR_EL0`、`MIDR_EL1`、`CLIDR_EL1` 与 `ID_AA64{PFR0,DFR0,ISAR0,ISAR1,MMFR0,MMFR1}_EL1`），共在 4 张分组内涵盖 28 个热系统寄存器访问，跳过 `_hv_helper_entry` 陷阱切换；
+   - `translate_one()` 对 EL1 下的 `IC IALLU` / `IC IALLUIS` 在未显式设置 `HV_IC_FLUSH` 时直接按零陷出空操作处理，不触发 helper 调用或截断超块。
+
+### 4. GitHub Actions 自动构建与下载
 每次推送至 `main` 分支或手动触发 [`.github/workflows/build-ipa.yml`](.github/workflows/build-ipa.yml) 时，将在 `xcode-27` macOS Runner 上自动执行以下流程：
 1. 运行 Swift 测试 `make test-engine-tuning` 与 9 项核心 C/汇编单元测试（`test_classify`、`test_jit_region`、`test_operands`、`test_helper_regs`、`test_mmu`、`test_jit`、`test_mem`、`test_exc`、`test_shutdown`）。
 2. 使用 `-O3 -mcpu=apple-m4` 编译 `libhengevm.a` 并通过 Xcode 27 + [`ios/scripts/package_ipa.sh`](ios/scripts/package_ipa.sh) 打包。

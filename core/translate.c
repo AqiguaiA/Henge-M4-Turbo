@@ -1551,27 +1551,9 @@ static int translate_sysreg_inline(Emit *e, uint32_t insn, uint64_t pc) {
         else if (el1) put_store_field(e, rt, HV_CPU_TPIDRRO_EL0);
         else return 0;
         return 1;
-    case SR(3, 0, 13, 0, 4): /* TPIDR_EL1 */
-    case SR(3, 0, 4, 0, 1):  /* ELR_EL1 */
-    case SR(3, 0, 4, 0, 0): { /* SPSR_EL1 */
-        if (!el1) return 0;
-        uint32_t off = reg == SR(3, 0, 13, 0, 4) ? HV_CPU_TPIDR_EL1 : reg == SR(3, 0, 4, 0, 1) ? HV_CPU_ELR_EL1 : HV_CPU_SPSR_EL1;
-        if (read) put_load_field(e, rt, off);
-        else put_store_field(e, rt, off);
-        return 1;
-    }
-    case SR(3, 0, 1, 0, 0): /* SCTLR_EL1, ESR_EL1, FAR_EL1: reads (writes have side effects or are rare) */
-    case SR(3, 0, 5, 2, 0):
-    case SR(3, 0, 6, 0, 0): {
-        if (!read || !el1) return 0;
-        uint32_t off = reg == SR(3, 0, 1, 0, 0) ? HV_CPU_SCTLR_EL1 : reg == SR(3, 0, 5, 2, 0) ? HV_CPU_ESR_EL1 : HV_CPU_FAR_EL1;
-        put_load_field(e, rt, off);
-        return 1;
-    }
-    case SR(3, 0, 2, 0, 2): /* TCR_EL1, PAR_EL1: reads (writes change translation; PAR is written by AT) */
-    case SR(3, 0, 7, 4, 0):
-        if (!read || !el1) return 0;
-        put_load_field(e, rt, reg == SR(3, 0, 2, 0, 2) ? HV_CPU_TCR_EL1 : HV_CPU_PAR_EL1);
+    case SR(3, 3, 0, 0, 7): /* DCZID_EL0: 64-byte DC ZVA */
+        if (!read) return 0;
+        put_const_to(e, rt, 4);
         return 1;
     case SR(3, 0, 4, 2, 3): /* PAN: a block is translated for one PAN state (HV_BLOCK_PAN) and every write ends it */
         if (!read || !el1) return 0;
@@ -1598,8 +1580,66 @@ static int translate_sysreg_inline(Emit *e, uint32_t insn, uint64_t pc) {
     case SR(3, 3, 4, 2, 6): /* SSBS */
         put_pstate_bit(e, rt, reg == SR(3, 3, 4, 2, 5) ? 24 : 12, read);
         return 1;
-    default:
+    default: {
+        if (!el1) return 0;
+        /* EL1 read/write storage registers whose writes have no side effects. */
+        static const struct { uint32_t reg, off; } el1_rw[] = {
+            {SR(3, 0, 13, 0, 4), HV_CPU_TPIDR_EL1},
+            {SR(3, 0, 4, 0, 1),  HV_CPU_ELR_EL1},
+            {SR(3, 0, 4, 0, 0),  HV_CPU_SPSR_EL1},
+            {SR(3, 0, 5, 2, 0),  HV_CPU_ESR_EL1},
+            {SR(3, 0, 6, 0, 0),  HV_CPU_FAR_EL1},
+            {SR(3, 0, 7, 4, 0),  HV_CPU_PAR_EL1},
+            {SR(3, 0, 13, 0, 1), HV_CPU_CONTEXTIDR_EL1},
+            {SR(2, 0, 0, 2, 2),  HV_CPU_MDSCR_EL1},
+        };
+        for (size_t i = 0; i < sizeof el1_rw / sizeof el1_rw[0]; i++) {
+            if (el1_rw[i].reg == reg) {
+                if (read) put_load_field(e, rt, el1_rw[i].off);
+                else put_store_field(e, rt, el1_rw[i].off);
+                return 1;
+            }
+        }
+        if (!read) return 0;
+        /* EL1 read-only storage registers (writes have side effects and go to the helper). */
+        static const struct { uint32_t reg, off; } el1_ro[] = {
+            {SR(3, 0, 1, 0, 0),  HV_CPU_SCTLR_EL1},
+            {SR(3, 0, 2, 0, 2),  HV_CPU_TCR_EL1},
+            {SR(3, 0, 2, 0, 0),  HV_CPU_TTBR0_EL1},
+            {SR(3, 0, 2, 0, 1),  HV_CPU_TTBR1_EL1},
+            {SR(3, 0, 12, 0, 0), HV_CPU_VBAR_EL1},
+            {SR(3, 0, 10, 2, 0), HV_CPU_MAIR_EL1},
+            {SR(3, 0, 1, 0, 2),  HV_CPU_CPACR_EL1},
+            {SR(3, 0, 14, 1, 0), HV_CPU_CNTKCTL_EL1},
+            {SR(3, 0, 0, 0, 5),  HV_CPU_MPIDR},
+        };
+        for (size_t i = 0; i < sizeof el1_ro / sizeof el1_ro[0]; i++) {
+            if (el1_ro[i].reg == reg) {
+                put_load_field(e, rt, el1_ro[i].off);
+                return 1;
+            }
+        }
+        /* Constant architectural ID and frequency registers at EL1. */
+        static const struct { uint32_t reg; uint64_t val; } el1_const[] = {
+            {SR(3, 3, 14, 0, 0), 24000000ull},           /* CNTFRQ_EL0 */
+            {SR(3, 3, 0, 0, 1),  0x9444c004ull},         /* CTR_EL0 */
+            {SR(3, 0, 0, 0, 0),  0x611f0220ull},         /* MIDR_EL1 */
+            {SR(3, 1, 0, 0, 1),  0x0a200023ull},         /* CLIDR_EL1 */
+            {SR(3, 0, 0, 4, 0),  0x1100000001110011ull}, /* ID_AA64PFR0_EL1 */
+            {SR(3, 0, 0, 5, 0),  0x0000000000000006ull}, /* ID_AA64DFR0_EL1 */
+            {SR(3, 0, 0, 6, 0),  0x0011100110212120ull}, /* ID_AA64ISAR0_EL1 */
+            {SR(3, 0, 0, 6, 1),  0x0000001110211011ull}, /* ID_AA64ISAR1_EL1 */
+            {SR(3, 0, 0, 7, 0),  0x0000000000100025ull}, /* ID_AA64MMFR0_EL1 */
+            {SR(3, 0, 0, 7, 1),  0x0000000000111000ull}, /* ID_AA64MMFR1_EL1 */
+        };
+        for (size_t i = 0; i < sizeof el1_const / sizeof el1_const[0]; i++) {
+            if (el1_const[i].reg == reg) {
+                put_const_to(e, rt, el1_const[i].val);
+                return 1;
+            }
+        }
         return 0;
+    }
     }
 }
 
@@ -1730,6 +1770,11 @@ static int translate_one(Emit *e, uint32_t insn, uint64_t pc) {
         if (crn == 7 && op1 == 3 && crm == 5 && op2 == 1 && (e->flags & HV_BLOCK_EL1) && !e->slow_mem && e->m->main_ram) {
             translate_ic_ivau(e, insn, pc);
             return 0;
+        }
+        if (crn == 7 && (crm == 1 || crm == 5) && op1 == 0 && op2 == 0 && (e->flags & HV_BLOCK_EL1)) {
+            static int ic_flush = -1; /* IC IALLUIS, IC IALLU: caches are coherent unless HV_IC_FLUSH is set */
+            if (ic_flush < 0) ic_flush = getenv("HV_IC_FLUSH") != NULL;
+            if (!ic_flush) return 0;
         }
         put_helper(e, pc, insn, HV_OP_SYS);
         /* DC and AT continue, and so does IC IVAU: invalidating code sets exit_req,

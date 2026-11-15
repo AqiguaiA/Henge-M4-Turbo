@@ -40,7 +40,8 @@ enum GuestMemory {
             .volumeAvailableCapacityForImportantUsage ?? 0
         let room = free > 0 ? UInt64(max(free - (2 << 30), 0)) >> 20 : UInt64.max
         let reach = henge_largest_mapping_mb()
-        let ram = min(UInt64(mac.ramMB), room, reach > 512 ? reach - 512 : 0) / 512 * 512
+        let headroom: UInt64 = reach >= 8192 ? 512 : 256
+        let ram = min(UInt64(mac.ramMB), room, reach > headroom ? reach - headroom : 0) / 256 * 256
         HengeLog.log("session", "guest RAM \(ram) MB (asked \(mac.ramMB), disk room \(room), largest mapping \(reach))")
         return ram
     }

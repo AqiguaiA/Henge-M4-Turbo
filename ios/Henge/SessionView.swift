@@ -484,6 +484,7 @@ struct SessionView: View {
             List {
                 Section(phase) {
                     LabeledContent("CPUs on", value: "\(cpusOn) of \(cpus)")
+                    LabeledContent("Memory", value: bootRAM > 0 ? "\(bootRAM) MB" : "\(mac.ramMB) MB")
                     LabeledContent("Temperature", value: Self.thermalLabel(thermalState))
                     LabeledContent("Translated blocks", value: String(format: "%.1f M/s", blocksPerSecond / 1e6))
                     LabeledContent("Network frames", value: "\(framesOut) out, \(framesIn) in")
@@ -586,12 +587,19 @@ struct SessionView: View {
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
         guard !Task.isCancelled else { return }
+        if henge_vm_can_start() == 0 {
+            error = "Quit Henge (swipe it away) and open it again before starting a Mac."
+            return
+        }
         UIApplication.shared.isIdleTimerDisabled = true
         HardwareMouse.shared.start()
         let ram = GuestMemory.prepare(mac)
         HengeLog.log("session", "available memory \(henge_available_memory() >> 20) MB")
         guard ram >= 1024 else {
-            error = "There is not room for this Mac's memory: it needs a few GB of free storage."
+            let reach = henge_largest_mapping_mb()
+            error = reach < 1280
+                ? "Not enough contiguous virtual address space (\(reach) MB available; choose a smaller Code cache in Settings, or restart Henge)."
+                : "There is not room for this Mac's memory: it needs a few GB of free storage."
             return
         }
         var buffer = [CChar](repeating: 0, count: 256)

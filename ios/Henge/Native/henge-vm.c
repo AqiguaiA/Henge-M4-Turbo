@@ -478,6 +478,7 @@ uint64_t henge_largest_reservation_gb(void) {
 }
 
 uint64_t henge_largest_mapping_mb(void) {
+    henge_ios_release_high_hold();
     for (uint64_t mb = 16896; mb >= 1024; mb -= 512) { /* 16 GB, the most a Mac can ask for, plus what the caller keeps back */
         void *p = mmap(NULL, mb << 20, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
         if (p != MAP_FAILED) {

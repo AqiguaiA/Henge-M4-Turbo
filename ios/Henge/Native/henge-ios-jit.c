@@ -546,7 +546,7 @@ static void henge_ios_hold_high(void)
     }
 }
 
-static void henge_ios_release_high_hold(void)
+HENGE_EXPORT void henge_ios_release_high_hold(void)
 {
     if (g_high_hold_given) return;
     for (int i = 0; i < 3; i++)
@@ -606,6 +606,7 @@ HENGE_EXPORT bool henge_ios_jit_prewarm_self(size_t bytes)
 /* The held region, for the native runtime (translation-layer/henge-tl-load.c looks this up by name). */
 HENGE_EXPORT HengeDualMapping *henge_ios_jit_get_mapping(void)
 {
+    henge_ios_release_high_hold(); /* a Mac is starting: give back the high room reserved for Mac apps */
     return henge_prewarmed.rw_addr ? &henge_prewarmed : NULL;
 }
 
@@ -999,6 +1000,7 @@ HengeDualMapping henge_ios_jit_allocate(size_t bytes)
     return henge_ios_jit_allocate_real(bytes);
 }
 int henge_ios_take_high_room(void **base, size_t *bytes) { (void)base, (void)bytes; return 0; }
+void henge_ios_release_high_hold(void) {}
 bool henge_ios_jit_prewarm(size_t bytes) { (void)bytes; return false; }
 bool henge_ios_jit_prewarm_self(size_t bytes) { (void)bytes; return false; }
 bool henge_ios_jit_reserve_bottom(size_t end) { (void)end; return true; }
